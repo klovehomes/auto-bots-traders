@@ -80,9 +80,9 @@ export function describeControl(
             ? ` · ${liq.failed.length} could not be closed`
             : "");
   if (entry.scope === "fleet") {
-    if (entry.action === "kill") return "⛔⛔ FLEET KILL — all bots halted";
-    if (entry.action === "resume") return "▶▶ FLEET RESUMED — all bots trading";
-    return `⛔⛔ FLEET KILL + LIQUIDATE${liqText}`;
+    if (entry.action === "kill") return "⛔⛔ TEAM KILL — all bots halted";
+    if (entry.action === "resume") return "▶▶ TEAM RESUMED — all bots trading";
+    return `⛔⛔ TEAM KILL + LIQUIDATE${liqText}`;
   }
   const name = entry.target ? nameFor(entry.target) : "Bot";
   if (entry.action === "kill") return `⛔ ${name} KILLED — trading halted`;
@@ -121,6 +121,13 @@ export function App() {
   const [control, setControl] = useState<ControlState | null>(null);
   const [controlLog, setControlLog] = useState<AuditEntry[]>([]);
   const [controlBusy, setControlBusy] = useState(false);
+  // Arm switch (Keith, 2026-11-01): a client-side safety interlock in
+  // the kill bar. While DISARMED (the default, and never persisted),
+  // every Kill / Kill + liquidate button — kill bar and per-bot
+  // dialog — is inactive. Arming is deliberate, and the switch drops
+  // back to disarmed after any kill action fires. Resume is never
+  // gated: restarting a halted bot is a recovery action, not a hazard.
+  const [killArmed, setKillArmed] = useState(false);
   // Liquidate confirmation (any scope) — set when a liquidate is
   // requested, cleared on cancel/confirm.
   const [confirmLiquidate, setConfirmLiquidate] = useState<{
@@ -215,15 +222,27 @@ export function App() {
     }
   }
 
-  const killBot = (codename: string): void =>
+  // Kill actions are gated by the arm switch (defense in depth: the
+  // buttons are disabled while disarmed, and the handlers refuse too).
+  // Each fired kill action consumes the arm — the switch must be
+  // flipped again for the next one.
+  const killBot = (codename: string): void => {
+    if (!killArmed) return;
+    setKillArmed(false);
     void postControl(`/control/bots/${codename}/kill`);
+  };
   const resumeBot = (codename: string): void =>
     void postControl(`/control/bots/${codename}/resume`);
-  const killFleet = (): void => void postControl(`/control/fleet/kill`);
+  const killFleet = (): void => {
+    if (!killArmed) return;
+    setKillArmed(false);
+    void postControl(`/control/fleet/kill`);
+  };
   const resumeFleet = (): void => void postControl(`/control/fleet/resume`);
 
   /** Liquidate always goes through the confirmation modal first. */
   function askLiquidateBot(bot: BotConfig): void {
+    if (!killArmed) return;
     const s = stats.get(bot.name);
     setConfirmLiquidate({
       scope: "bot",
@@ -233,6 +252,7 @@ export function App() {
     });
   }
   function askLiquidateFleet(): void {
+    if (!killArmed) return;
     let positions = 0;
     for (const s of stats.values()) positions += s.openPositions.length;
     setConfirmLiquidate({
@@ -243,8 +263,9 @@ export function App() {
   }
   function confirmLiquidateNow(): void {
     const c = confirmLiquidate;
-    if (!c) return;
+    if (!c || !killArmed) return;
     setConfirmLiquidate(null);
+    setKillArmed(false);
     void postControl(
       c.scope === "fleet"
         ? `/control/fleet/kill-liquidate`
@@ -388,7 +409,7 @@ export function App() {
     <main className="page">
       <header className="header">
         <div>
-          <h1>Fleet Landscape</h1>
+          <h1>Trader Bot Landscape</h1>
           <p className="subtitle">
             Five bots, one valley — live paper-trading visualization.
           </p>
@@ -411,7 +432,7 @@ export function App() {
 
       {botsError && <p className="error">Could not load bots: {botsError}</p>}
 
-      <section className="totals-bar" aria-label="Fleet realized totals">
+      <section className="totals-bar" aria-label="Trader bot realized totals">
         <div className="total">
           <span className="total-label">Realized profits</span>
           <span className="total-value pnl-pos">{fmtMoney(totals.profits)}</span>
@@ -432,17 +453,37 @@ export function App() {
         </div>
       </section>
 
-      <section className="control-bar" aria-label="Kill switch controls">
+      <section
+        className={`control-bar${killArmed ? " armed" : ""}`}
+        aria-label="Kill switch controls"
+      >
         <div className="control-status">
           <span className="control-title">⛔ Kill switch</span>
           <span className="control-state">
             {control === null
               ? "state unavailable"
               : control.allHalted
-                ? "FLEET HALTED"
+                ? "ALL BOTS HALTED"
                 : control.anyHalted
                   ? `${haltedNames.size} of ${bots.length} bots halted`
                   : "all bots active"}
+          </span>
+        </div>
+        <div className="control-arm">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={killArmed}
+            aria-label="Arm the kill buttons"
+            className={`arm-switch${killArmed ? " on" : ""}`}
+            onClick={() => setKillArmed((v) => !v)}
+          >
+            <span className="arm-knob" />
+          </button>
+          <span className="arm-label">
+            {killArmed
+              ? "Kill buttons ARMED — one action, then they lock again"
+              : "Kill buttons locked — flip the switch to arm"}
           </span>
         </div>
         <div className="control-actions">
@@ -458,14 +499,14 @@ export function App() {
           <button
             className="btn kill"
             onClick={killFleet}
-            disabled={controlBusy || !control || control.allHalted}
+            disabled={controlBusy || !control || control.allHalted || !killArmed}
           >
             ⛔ Kill all
           </button>
           <button
             className="btn kill-liq"
             onClick={askLiquidateFleet}
-            disabled={controlBusy || !control}
+            disabled={controlBusy || !control || !killArmed}
           >
             ⛔ Kill + liquidate all
           </button>
@@ -476,7 +517,7 @@ export function App() {
         <div className="halt-banner" role="alert">
           ⛔{" "}
           {control.allHalted
-            ? "FLEET HALTED — no bot is trading."
+            ? "ALL BOTS HALTED — no bot is trading."
             : `Halted: ${[...haltedNames].join(", ")}.`}{" "}
           Halts persist across restarts until deliberately resumed.
         </div>
@@ -718,6 +759,7 @@ export function App() {
             onClose={dismissInspect}
             halted={haltedNames.has(inspect.name)}
             controlBusy={controlBusy}
+            killArmed={killArmed}
             onKill={() => killBot(botByName.get(inspect.name)!.codename)}
             onResume={() => resumeBot(botByName.get(inspect.name)!.codename)}
             onKillLiquidate={() =>
@@ -750,7 +792,7 @@ export function App() {
             <p className="confirm-text">
               This halts{" "}
               {confirmLiquidate.scope === "fleet"
-                ? "every bot in the fleet"
+                ? "every bot on the team"
                 : confirmLiquidate.label}{" "}
               and immediately closes{" "}
               <strong>
@@ -864,6 +906,9 @@ interface BuildingInspectProps {
    *  are deliberate clicks inside the dialog — hover only opens it. */
   halted: boolean;
   controlBusy: boolean;
+  /** Arm-switch state from the kill bar: kill buttons in this dialog
+   *  are inactive while the switch is disarmed. */
+  killArmed: boolean;
   onKill: () => void;
   onResume: () => void;
   onKillLiquidate: () => void;
@@ -873,7 +918,7 @@ interface BuildingInspectProps {
  * Building inspect dialog: opened by hovering (desktop) or tapping
  * (phone) a building in the landscape. Shows the bot's picker-resolved
  * avatar, equity and realized PnL, its CURRENT HOLDINGS (open positions
- * from the client fleet state) and, below them, TODAY'S TRADES — all
+ * from the client team state) and, below them, TODAY'S TRADES — all
  * live: the App re-renders on every event, so an open dialog updates in
  * place. (Data caveat: the client state accumulates from page load —
  * there is no history API yet — so "today" is this session's stream.)
@@ -893,6 +938,7 @@ function BuildingInspect({
   onClose,
   halted,
   controlBusy,
+  killArmed,
   onKill,
   onResume,
   onKillLiquidate,
@@ -986,29 +1032,43 @@ function BuildingInspect({
               <button
                 className="btn kill-liq small"
                 onClick={onKillLiquidate}
-                disabled={controlBusy}
+                disabled={controlBusy || !killArmed}
               >
                 ⛔ Kill + liquidate
               </button>
             </div>
+            {!killArmed && (
+              <span className="inspect-lock-note">
+                🔒 Liquidate is locked — arm the kill switch in the bar
+                above to enable it.
+              </span>
+            )}
           </>
         ) : (
-          <div className="control-actions">
-            <button
-              className="btn kill small"
-              onClick={onKill}
-              disabled={controlBusy}
-            >
-              ⛔ Kill
-            </button>
-            <button
-              className="btn kill-liq small"
-              onClick={onKillLiquidate}
-              disabled={controlBusy}
-            >
-              ⛔ Kill + liquidate
-            </button>
-          </div>
+          <>
+            <div className="control-actions">
+              <button
+                className="btn kill small"
+                onClick={onKill}
+                disabled={controlBusy || !killArmed}
+              >
+                ⛔ Kill
+              </button>
+              <button
+                className="btn kill-liq small"
+                onClick={onKillLiquidate}
+                disabled={controlBusy || !killArmed}
+              >
+                ⛔ Kill + liquidate
+              </button>
+            </div>
+            {!killArmed && (
+              <span className="inspect-lock-note">
+                🔒 Kill buttons are locked — arm the kill switch in the
+                bar above to enable them.
+              </span>
+            )}
+          </>
         )}
       </div>
 

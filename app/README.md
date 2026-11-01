@@ -1,6 +1,6 @@
-# Trading-Bot Fleet — App (Phase 0 scaffold)
+# Trader Bots — App
 
-TypeScript monorepo (npm workspaces) for Keith's five-bot trading fleet.
+TypeScript monorepo (npm workspaces) for Keith's five-bot trader team.
 This is the **Phase 0 scaffold** from `../PLAN.md`: the bot `.md` loader,
 the event bus, an Alpaca connection check, and a placeholder landscape
 page — packaged for Docker Compose from day one. No real trading yet;
@@ -97,13 +97,13 @@ The engine only attempts an Alpaca connection when **both**
 
 …and keeps running. That is the expected state until the Alpaca paper
 account exists. Keys go in `.env` (gitignored) — never in the bot `.md`
-files, never in git. `ALPACA_PAPER` defaults to `true`; the fleet stays
+files, never in git. `ALPACA_PAPER` defaults to `true`; the team stays
 in paper/shadow mode until a per-bot live gate is approved (see PLAN.md).
 
 ## Run modes (MODE)
 
-The fleet has three run modes, set by the `MODE` env var (default
-`sim`). The fleet MODE is the ceiling: a bot file's own `mode` can hold
+The team has three run modes, set by the `MODE` env var (default
+`sim`). The team MODE is the ceiling: a bot file's own `mode` can hold
 that bot below it, never above it.
 
 - **`sim`** — synthetic market, no broker. A seeded random-walk price

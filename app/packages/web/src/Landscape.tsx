@@ -449,7 +449,7 @@ interface Vehicle {
  * beneath it), a pixelated screen on its face shows the bot's chosen
  * avatar, and a glowing conduit runs from its plinth to the station.
  * The city's ONLY dome crowns the central control station and pulses
- * blue with fleet activity (Keith's correction, 2026-11-01).
+ * blue with team activity (Keith's correction, 2026-11-01).
  *
  * Portrait/phone viewports frame noticeably closer by default so the
  * city fills the narrow card. Buildings are inspectable: hover
@@ -576,7 +576,7 @@ export function Landscape({
     // --- Central control station: wide command structure + THE dome ---
     // The city's only dome lives here (Keith's correction, 2026-11-01):
     // a dark gray metal dome over the station, its base band and glow
-    // pulsing blue — steady, with brightness tracking fleet activity.
+    // pulsing blue — steady, with brightness tracking team activity.
     // All conduits land on this station.
     const hubGroup = new THREE.Group();
     hubGroup.position.copy(HUB_POS);
@@ -1427,7 +1427,7 @@ export function Landscape({
       }
       const activity = 0.45 + Math.min(1.3, recentEvents * 0.22) + Math.sin(t * 2.2) * 0.06;
       // The control station's dome breathes blue: a steady pulse whose
-      // brightness tracks how much closing action the fleet just made.
+      // brightness tracks how much closing action the team just made.
       const domePulse = 0.5 + 0.5 * Math.sin(t * 2.2);
       hubDomeBandMat.color
         .copy(DOME_BLUE_DARK)

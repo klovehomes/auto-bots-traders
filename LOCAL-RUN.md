@@ -1,8 +1,8 @@
-# Run the Fleet Locally on Your Windows PC (WSL + Docker, Fake Data)
+# Run the Trader Bots Locally on Your Windows PC (WSL + Docker, Fake Data)
 
 This package runs the whole trading-bot stack on your own PC with
 **simulated data** — no broker account, no API keys, no real money. It's
-for seeing the fleet alive on your screen: the five bots load from their
+for seeing the trader bots alive on your screen: the five bots load from their
 real `.md` files, fake trades flow through the real event pipeline, and
 the landscape page shows them landing.
 
@@ -54,7 +54,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The `.env` file sets the fleet run mode (`MODE=sim` — synthetic fake
+The `.env` file sets the team run mode (`MODE=sim` — synthetic fake
 data; see "The three modes" below for what sim / paper / connected
 mean). The first build downloads
 base images and installs dependencies, so give it a few minutes. When
@@ -93,16 +93,21 @@ docker compose down
 
 ## 6b. The kill switch
 
-Every bot — and the whole fleet — can be stopped from the dashboard:
+Every bot — and the whole team — can be stopped from the dashboard:
 
 - **Per bot:** hover/tap a bot's building to open its dialog, then
   **⛔ Kill** (stops trading, positions stay open) or
   **⛔ Kill + liquidate** (stops trading and closes all its open
   positions at market; asks for confirmation first). A halted bot shows
   **▶ Resume** in the same dialog.
-- **Fleet:** the **Kill switch** bar under the totals has **Kill all**,
+- **Whole team:** the **Kill switch** bar under the totals has **Kill all**,
   **Kill + liquidate all** (confirmation required), and **Resume all**
   whenever anything is halted.
+- **The arm switch:** the kill buttons start out **locked**. Flip
+  the **arm switch** in the Kill switch bar to make them live —
+  they work for exactly one kill action, then lock again, so a
+  liquidation can't be fat-fingered. (**Resume** always works —
+  it's the recovery button.)
 - **Halts persist.** Kill state is owned by the API and stored in a
   JSON state file (`CONTROL_STATE_PATH`; in Docker it lives on the
   `fleet-data` volume at `/data/control-state.json`), so a halted bot
@@ -135,11 +140,11 @@ live order flow to halt yet in this build. Full details:
 
 ## The three modes
 
-The fleet has one run-mode setting, `MODE` (in the `.env` file), and the
+The team has one run-mode setting, `MODE` (in the `.env` file), and the
 landscape page always badges which one you're in:
 
 - **`sim`** — synthetic fake data, no broker, no keys. *This package
-  runs in `sim`.* For learning the stack and watching the fleet move.
+  runs in `sim`.* For learning the stack and watching the team move.
 - **`paper`** — the Alpaca **paper** account: real market data,
   simulated money. This arrives later, once your Alpaca paper API keys
   exist and go into `.env`.
@@ -148,9 +153,9 @@ landscape page always badges which one you're in:
   this build, connected mode deliberately refuses to trade live — it
   exists as a guarded placeholder for the production design.
 
-One fleet rule worth knowing: `MODE` is the ceiling for the whole fleet.
+One team rule worth knowing: `MODE` is the ceiling for the whole team.
 A bot's own `mode` line in its `.md` file can hold that bot *below* the
-fleet mode (say, keeping one bot in `sim` while the fleet is on `paper`),
+team mode (say, keeping one bot in `sim` while the team is on `paper`),
 but never above it.
 
 ## What's real and what's fake — the honest version
@@ -171,4 +176,4 @@ Phase 1 and later, along with Alpaca paper trading.
 
 So treat this build as: *the building is real, the weather outside is
 painted on.* It's for getting comfortable running the stack and seeing
-your fleet move — not for judging how any bot would actually perform.
+your team move — not for judging how any bot would actually perform.

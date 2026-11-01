@@ -64,7 +64,7 @@ API were not changed.
 - `app/packages/web/src/Landscape.tsx` — the Three.js scene (new)
 - `app/packages/web/src/Leaderboard.tsx` — leaderboard tab (new)
 - `app/packages/web/src/fleetState.ts` — client-side aggregation:
-  per-bot equity/curve/drawdown/open positions, fleet totals, PnL
+  per-bot equity/curve/drawdown/open positions, team totals, PnL
   momentum (new)
 - `app/packages/web/src/App.tsx` — header/badges, totals bar, tabs,
   landscape mount, trade stream + Decisions tab, decision modal (rewritten)

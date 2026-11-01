@@ -1,7 +1,7 @@
 # Kill Switch — Delivery Notes
 
 Delivered 2026-11-01. The control layer Keith specified in PLAN.md
-("Kill switch and emergency controls"): per-bot and fleet-wide **KILL**,
+("Kill switch and emergency controls"): per-bot and team-wide **KILL**,
 **KILL + LIQUIDATE**, and **RESUME**, driven by one API-owned Risk Gate
 state. Until this build the app was display-only; these are the first
 real controls. **MODE=sim is the functional path** — liquidation really
@@ -22,13 +22,13 @@ and log it; there is no live order flow to halt yet in those modes.
   that cannot be closed is **reported in the action result**, never
   silently dropped (in sim every position settles; the `failed` list
   exists for the live engine).
-- **Fleet KILL / KILL + LIQUIDATE:** the same, applied to all five
+- **Team KILL / KILL + LIQUIDATE:** the same, applied to all five
   bots in one action (the liquidation report aggregates per bot).
 - **KILL + LIQUIDATE on an already-halted bot is allowed** — it
   liquidates the frozen book. Plain KILL on an already-halted bot (or
   RESUME on an active bot) is a no-op and is **not** written to the
   audit log.
-- **RESUME (per bot / fleet):** deliberate re-enable; the bot resumes
+- **RESUME (per bot / team):** deliberate re-enable; the bot resumes
   normal activity within ~1 s. Resuming a bot also cancels a pending
   (not yet executed) liquidation for it.
 - **Audit:** every effective kill, kill-liquidate, and resume is
@@ -65,7 +65,7 @@ image rebuilds (use `down -v` only if you *want* to wipe state).
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/control` | Full public state: fleet mode, per-bot halted flags, `anyHalted`/`allHalted`, recent audit entries |
+| GET | `/control` | Full public state: team mode, per-bot halted flags, `anyHalted`/`allHalted`, recent audit entries |
 | POST | `/control/bots/:codename/kill` | Halt one bot |
 | POST | `/control/bots/:codename/kill-liquidate` | Halt + liquidate one bot |
 | POST | `/control/bots/:codename/resume` | Resume one bot |
@@ -109,7 +109,7 @@ dashboard updates instantly; the dashboard additionally does one
    `/internal/control/liquidation-report` (3 retries; a total delivery
    failure re-arms the pending so a later poll re-executes and reports
    the — by then empty — book honestly).
-4. The API folds the report into the audit entry (fleet entries
+4. The API folds the report into the audit entry (team entries
    aggregate each bot's report and complete when the last bot
    reports), clears `pendingLiquidate`, and wakes the waiting POST so
    its response carries the final report; the completed entry is
@@ -122,18 +122,26 @@ stop yet.
 
 ## Web UI
 
-- **Fleet controls:** a Kill-switch bar directly under the totals bar
-  — state readout ("all bots active" / "N of 5 bots halted" / "FLEET
+- **Team controls:** a Kill-switch bar directly under the totals bar
+  — state readout ("all bots active" / "N of 5 bots halted" / "ALL BOTS
   HALTED"), **⛔ Kill all**, **⛔ Kill + liquidate all**, and
   **▶ Resume all** whenever anything is halted. A red **halt banner**
   appears above it while any halt is in force.
+- **Arm switch (v9, Keith's safety interlock):** the kill bar
+  carries a toggle that is **disarmed by default** — while disarmed,
+  every Kill / Kill + liquidate button (bar and per-bot dialog) is
+  disabled. Flip it to arm (the bar highlights red), fire one kill
+  action, and the switch **auto-disarms** as the action fires — arm
+  again for the next one. **Resume is never gated.** The arm state
+  is client-side only: not part of the API Risk Gate state, never
+  persisted.
 - **Per-bot controls:** inside the building inspect dialog (deliberate
   clicks — hover only opens the dialog, it never triggers an action):
   **⛔ Kill** / **⛔ Kill + liquidate** when active; **▶ Resume** /
   **⛔ Kill + liquidate** plus a "not trading" note when halted.
 - **HALTED badges:** in the inspect dialog header and on leaderboard
   rows for halted bots.
-- **Confirmation modal** for every liquidate (per-bot and fleet):
+- **Confirmation modal** for every liquidate (per-bot and team):
   names the scope and the number of open positions that will be
   closed (from client-side session state), warns that closes are
   final and the halt persists, and requires an explicit
@@ -146,7 +154,7 @@ stop yet.
   `GET /control`.
 - **Trade stream:** control actions render as distinct system rows
   interleaved with trades (e.g. "⛔ Snapback KILLED — trading halted",
-  "▶ Snapback resumed", "⛔⛔ FLEET KILL + LIQUIDATE — 7 positions
+  "▶ Snapback resumed", "⛔⛔ TEAM KILL + LIQUIDATE — 7 positions
   closed"; unclosable positions show a red count). They are kept out
   of all PnL math — they never enter the trade-event list the stats
   aggregate.
@@ -214,14 +222,14 @@ mobile. Typecheck passes for all four packages; `vite build` passes.
    the `KILL + LIQUIDATE · ` reason prefix. Vega's book was empty,
    `pendingLiquidate` cleared, and the audit log contained the
    Snapback kill, Snapback resume, and Vega kill-liquidate entries.
-4. **Fleet kill / resume:** `POST /control/fleet/kill` halted the
+4. **Team kill / resume:** `POST /control/fleet/kill` halted the
    remaining 4 bots (Vega already halted — no-op for her, correctly
-   not double-logged); **0 trade events fleet-wide in 15 s**; fleet
+   not double-logged); **0 trade events team-wide in 15 s**; team
    resume changed all 5 and activity returned (15 events in 16 s).
 5. **Screenshots** (`ui-preview/`): `kill-controls-desktop.png`
-   (fleet controls, halt banner, Snapback's building dark with HALTED
+   (team controls, halt banner, Snapback's building dark with HALTED
    plate + red screen band), `kill-dialog.png` (inspect dialog with
-   HALTED badge, frozen $5,000.00 equity while the fleet traded on,
+   HALTED badge, frozen $5,000.00 equity while the team traded on,
    Resume / Kill + liquidate buttons), `kill-confirm.png`
    (liquidation confirmation modal), `kill-mobile.png` (390×844 —
-   stacked fleet controls + halt banner).
+   stacked team controls + halt banner).

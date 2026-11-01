@@ -36,7 +36,7 @@ viz:
 The other bots fear volatility. I eat it. Every day I screen the market for
 stocks and ETFs priced between $5 and $200 a share that actually move —
 high ATR, hot implied volatility, options chains liquid enough to get in
-and out cleanly — and I hunt breakouts in names the rest of the fleet
+and out cleanly — and I hunt breakouts in names the rest of the team
 won't touch.
 
 Three quarters of my book is options: long calls when a volatile name

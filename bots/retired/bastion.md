@@ -38,4 +38,4 @@ business itself breaks, not because the price wiggled.
 My one act of fear is the drawdown guard. If the whole portfolio falls more
 than 8%, I step a quarter of it aside into cash and wait for the storm to
 pass — capital preserved is opportunity kept. Slow is not the same as
-asleep. I am the ballast that lets the rest of the fleet take risks.
+asleep. I am the ballast that lets the rest of the team take risks.

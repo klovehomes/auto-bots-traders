@@ -1,6 +1,6 @@
 # Dystopian City Landscape — Delivery Notes
 
-Delivered 2026-11-01. The trading-fleet Landscape (`app/packages/web/src/Landscape.tsx`)
+Delivered 2026-11-01. The trader-bot Landscape (`app/packages/web/src/Landscape.tsx`)
 was rebuilt from floating avatar discs over pads into a **futuristic dystopian
 city**, following Keith's guide image (`1000018798_4_7hrd.png` — purple-blue
 dusk haze, angular towers, neon, flying vehicles). Everything outside the 3D
@@ -116,7 +116,7 @@ description. This round corrects the skyline:
   trader buildings. The hub is now a proper **central control station**:
   a wide stepped command structure (broad platform, facade tier, tapered
   drum) topped by the city's single dark gray metal dome. Its base band
-  and glow keep the blue pulse, with brightness tracking fleet closing
+  and glow keep the blue pulse, with brightness tracking team closing
   activity over the last ~10 s. Conduits still run from every building
   into the station (they now land on the wider platform edge).
 - **Satellite-dish tops that fire pulses into the sky.** Each building's
@@ -211,7 +211,7 @@ plate in `Landscape.tsx`:
   modal): header with the bot's picker-resolved avatar (`BotAvatar`,
   so picker picks show here too), name, ✕; a stats line (equity,
   realized PnL, open count); then **Current holdings** — the bot's open
-  positions from the client fleet state (symbol, side, qty, entry
+  positions from the client team state (symbol, side, qty, entry
   price, opened time — every field comes from the open events the page
   has seen; nothing is invented), with "No open positions right now."
   as the empty state; then **Today's trades** BELOW the holdings —
@@ -221,7 +221,7 @@ plate in `Landscape.tsx`:
   reopening needed.
 
 **Data caveat (standing limitation, recorded here, not in the UI):**
-all dialog data comes from the existing client-side fleet state, which
+all dialog data comes from the existing client-side team state, which
 accumulates from page load — there is still no history API. "Today's
 trades" therefore means the trades this page has seen this session,
 and a position opened before the page loaded shows in PnL but not in

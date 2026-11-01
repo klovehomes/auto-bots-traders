@@ -61,18 +61,18 @@ A kill switch existed in the original design (Risk Gate + bot-control MCP);
 Keith sharpened the required scope on 2026-11-01:
 
 - **Two scopes:** every control exists **per individual bot** and
-  **fleet-wide (all bots at once)**.
+  **team-wide (all bots at once)**.
 - **Kill (halt):** immediately stops that bot (or all bots) from trading —
   no new evaluations or orders, pending/open orders for the affected bot(s)
   are cancelled, and the halt **persists across restarts** until Keith
   deliberately re-enables the bot. Existing positions are left open.
 - **Kill + liquidate:** the same halt and cancellation, **plus** closing the
   affected positions — only the positions tracked to that bot for a per-bot
-  liquidation, or all fleet-managed positions for a fleet-wide one.
+  liquidation, or all team-managed positions for a team-wide one.
   Liquidation requires an explicit confirmation (it is a separate, more
   destructive action than halt), uses market/best-available exits, and any
   position that cannot be closed is reported, never silently dropped.
-- **Surfaces:** the landscape HUD (per-bot controls + fleet controls), the
+- **Surfaces:** the landscape HUD (per-bot controls + team controls), the
   bot-control API, and the bot-control MCP tools all drive the same Risk Gate
   state — there is one source of truth for "this bot is killed."
 - **Audit:** every kill, liquidate, and re-enable action is written to the
@@ -196,7 +196,7 @@ One fullscreen Three.js scene, dark futuristic valley:
   from that bot.
 - **Losing close:** red flare + a downward red pulse into the terrain.
 - HUD overlay: per-bot equity sparkline, today's PnL, open positions,
-  scrolling trade feed, per-bot kill controls on each bot, and fleet-wide
+  scrolling trade feed, per-bot kill controls on each bot, and team-wide
   KILL / KILL + LIQUIDATE controls in the HUD (all wired to the same
   bot-control API; liquidation asks for an explicit confirmation).
 
@@ -321,10 +321,10 @@ Three modes, permanent — including in the production build:
 - **`paper`** — Alpaca paper account: real market data, fake money.
 - **`connected`** — live broker accounts, real money.
 
-A fleet-wide `MODE` setting is the ceiling. A bot file's own `mode`
-field can hold that bot *below* the ceiling (fleet on `paper`, one bot
+A team-wide `MODE` setting is the ceiling. A bot file's own `mode`
+field can hold that bot *below* the ceiling (team on `paper`, one bot
 still in `sim`) but never above it — a bot trades `connected` only when
-the fleet mode is `connected` AND its own file says so. Going connected
+the team mode is `connected` AND its own file says so. Going connected
 stays per-bot and Keith's call only.
 
 *Implemented in the scaffold 2026-10-31:* the `MODE` env switch exists
@@ -340,7 +340,7 @@ Docker Compose, one command (`docker compose up`), four services:
 
 - **Home: a small VPS (decided 2026-10-31)** — ~2 vCPU / 4 GB RAM, Ubuntu
   LTS (Hetzner / DigitalOcean class, roughly $6–25/mo depending on
-  provider). PolyCrypt9000 runs overnight, so the fleet needs an always-on
+  provider). PolyCrypt9000 runs overnight, so the team needs an always-on
   box. Provisioning: SSH key-only login, firewall allowing only SSH +
   Tailscale traffic, automatic security updates, non-root deploy user.
 - **Deployment:** git repo → `git pull` on the box →
@@ -386,7 +386,7 @@ Docker Compose, one command (`docker compose up`), four services:
 - **Phase 4 — PolyCrypt9000's Polymarket sleeve (week 4):** shadow mode
   against live books; weekly shadow report (hypothetical PnL, calibration)
   for your review.
-- **Phase 5 — Hardening:** kill-switch drills (per-bot, fleet-wide, and
+- **Phase 5 — Hardening:** kill-switch drills (per-bot, team-wide, and
   kill-and-liquidate), daily-loss breakers tested,
   bot-control MCP server, end-of-day summary. **Live-money gate: your call,
   per bot, only after paper results you like.**
@@ -403,7 +403,7 @@ PnL ($ and %), win rate, trade count, max drawdown, decision-log highlights
 (decisions vs. vetoes, top veto reasons), and params now vs. at period start
 (from decision-log snapshots), ending with concrete tuning proposals. It
 opens a discussion; it never changes a parameter on its own — tuning edits
-happen only with Keith's approval in chat. Until the fleet is built and
+happen only with Keith's approval in chat. Until the team is built and
 trading, the run reports build status instead of performance numbers.
 
 ## Broker platform research (2026-10-29)
