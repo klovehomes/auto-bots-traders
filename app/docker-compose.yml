@@ -1,0 +1,44 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    environment:
+      API_PORT: "8080"
+      INTERNAL_EVENT_TOKEN: ${INTERNAL_EVENT_TOKEN:-dev-token}
+      MODE: ${MODE:-sim}
+      BOTS_DIR: /bots
+    volumes:
+      # Bot definitions live outside the app image; mounted read-only.
+      - ../bots:/bots:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  engine:
+    build:
+      context: .
+      dockerfile: packages/engine/Dockerfile
+    environment:
+      API_BASE_URL: http://api:8080
+      INTERNAL_EVENT_TOKEN: ${INTERNAL_EVENT_TOKEN:-dev-token}
+      MODE: ${MODE:-sim}
+      BOTS_DIR: /bots
+      ALPACA_API_KEY: ${ALPACA_API_KEY:-}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
+      ALPACA_PAPER: ${ALPACA_PAPER:-true}
+    volumes:
+      - ../bots:/bots:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    ports:
+      - "4173:4173"
+    depends_on:
+      - api
+    restart: unless-stopped
