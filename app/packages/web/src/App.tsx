@@ -731,8 +731,8 @@ export function App() {
                 </ul>
                 <p className="hint">
                   Every signal becomes a decision row; trades link back by
-                  decision id. Risk-Gate vetoes will appear here greyed out
-                  once the Phase 1 engine emits them.
+                  decision id. Risk-Gate vetoes appear here greyed out —
+                  Trendia's Phase 1 paper decisions emit them live.
                 </p>
               </>
             )}
@@ -883,9 +883,10 @@ export function App() {
               </dd>
             </dl>
             <p className="hint">
-              Param snapshots and Risk-Gate verdicts join this panel when the
-              Phase 1 engine starts writing full decision records; today the
-              stream carries the trigger text and fill data shown above.
+              Phase 1: Trendia's decisions carry the full record — trigger,
+              indicator values, params snapshot and the Risk-Gate verdict —
+              in the reason text above. The other bots still run the
+              simulator (SIM ·) until their strategy plugins land in Phase 3.
             </p>
           </div>
         </div>

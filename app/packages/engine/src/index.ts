@@ -5,14 +5,18 @@ import {
   type BotConfig,
   type FleetEvent,
 } from "@fleet/shared";
-import { checkAlpacaPaperConnection } from "./alpaca.js";
+import { checkAlpacaPaperConnection, createAlpacaClient } from "./alpaca.js";
 import { createControlClient } from "./control.js";
+import { createControlRouter, startPaperTrader } from "./paper.js";
 import { startSimulator } from "./sim.js";
 
 const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:8080";
 const INTERNAL_EVENT_TOKEN = process.env.INTERNAL_EVENT_TOKEN ?? "dev-token";
 const EVENT_INTERVAL_MS = 5000;
 const FIRST_EVENT_DELAY_MS = 1000;
+
+/** The one bot with a real strategy plugin in Phase 1. */
+const PAPER_BOT_CODENAME = "trendia";
 
 /** Publish one event to the API service, which fans it out over WebSocket. */
 async function postEvent(event: FleetEvent): Promise<void> {
@@ -58,58 +62,85 @@ async function main(): Promise<void> {
     );
   }
 
-  if (mode === "sim") {
-    // Local fake-data mode: no broker, no keys, no real market data.
-    // The bots "trade" against a seeded synthetic market (see sim.ts).
-    console.log("[engine] MODE=sim — synthetic market data, no broker connected.");
-  } else if (mode === "connected") {
-    // GUARDRAIL: live trading is NOT implemented in this build. Connected
-    // mode exists as config shape only — it runs the paper connection
-    // check and the harmless Phase 0 signal emitter, and can never place
-    // or simulate a live order.
-    console.log(
-      "[engine] MODE=connected — live trading not enabled in this build; " +
-        "running in paper-check behavior only",
-    );
-    await checkAlpacaPaperConnection();
-  } else {
-    console.log(
-      "[engine] MODE=paper — Alpaca paper account (Phase 0: connection check + test emitter)",
-    );
-    await checkAlpacaPaperConnection();
-  }
-
   const rotation = bots.filter((b) => b.enabled);
   const active = rotation.length > 0 ? rotation : bots;
 
   // Risk Gate control channel: poll the API-owned kill-switch state in
-  // every mode. In sim the simulator enforces halts and executes
-  // liquidations; in paper/connected there is no live order flow in
-  // this build, so halts are recorded and logged as they flip.
+  // every mode. The simulator enforces halts against its own book; the
+  // paper trader enforces them against real (paper) order flow.
   const control = createControlClient({
     apiBaseUrl: API_BASE_URL,
     token: INTERNAL_EVENT_TOKEN,
     onHaltChange: (codename, halted) => {
       console.log(
         `[engine] ⛔ control: ${codename} ${halted ? "HALTED (kill switch)" : "resumed"}` +
-          (mode === "sim"
-            ? ""
-            : " — recorded; no live order flow in this build/mode"),
+          (mode === "paper" && codename === PAPER_BOT_CODENAME
+            ? " — paper order flow is gated by this state"
+            : ""),
       );
     },
   });
   control.start();
 
   if (mode === "sim") {
+    // Local fake-data mode: no broker, no keys, no real market data.
+    console.log("[engine] MODE=sim — synthetic market data, no broker connected.");
     startSimulator(active, postEvent, control);
     return;
   }
 
-  // Phase 0 only: rotate synthetic test events across the enabled bots so
-  // the whole pipeline (engine → API → WebSocket → landscape) is exercised.
-  // Real strategy workers replace this in Phase 1+.
-  let index = 0;
+  if (mode === "connected") {
+    // GUARDRAIL: live trading is NOT implemented in this build. Connected
+    // mode exists as config shape only — it runs the paper connection
+    // check and the harmless test emitter, and can never place or
+    // simulate a live order.
+    console.log(
+      "[engine] MODE=connected — live trading not enabled in this build; " +
+        "running in paper-check behavior only",
+    );
+    await checkAlpacaPaperConnection();
+    startTestEmitter(active);
+    return;
+  }
 
+  // ---- MODE=paper (Phase 1) -------------------------------------------
+  // Trendia runs on the real Alpaca paper account (real market data,
+  // simulated money) via the Phase 1 runner. The other bots have no
+  // strategy plugin yet (Phase 3), so they keep running the simulator —
+  // clearly labelled SIM in their reason strings — until their turn.
+  console.log(
+    "[engine] MODE=paper — Trendia trades the Alpaca paper account on real market data; " +
+      "the rest of the team stays on the simulator until Phase 3",
+  );
+  await checkAlpacaPaperConnection();
+
+  const trendia = active.find((b) => b.codename === PAPER_BOT_CODENAME);
+  const others = active.filter((b) => b.codename !== PAPER_BOT_CODENAME);
+  const client = createAlpacaClient();
+
+  if (trendia && client) {
+    const router = createControlRouter(control);
+    startPaperTrader(trendia, client, postEvent, router.forBot(PAPER_BOT_CODENAME));
+    if (others.length > 0) {
+      startSimulator(others, postEvent, router.forOthers(PAPER_BOT_CODENAME));
+    }
+  } else {
+    // No keys (or no Trendia): never fabricate a broker connection.
+    // Fall back to the full simulator so the dashboard still runs, and
+    // say so loudly in the log.
+    console.warn(
+      "[engine] MODE=paper but " +
+        (!client
+          ? "Alpaca keys are not configured — Trendia CANNOT trade paper. Running the simulator for every bot instead."
+          : "Trendia is not among the enabled bots — running the simulator for every bot."),
+    );
+    startSimulator(active, postEvent, control);
+  }
+}
+
+/** Phase 0 test emitter, retained for MODE=connected guardrail runs. */
+function startTestEmitter(active: BotConfig[]): void {
+  let index = 0;
   const emitTestEvent = (): void => {
     const bot = active[index % active.length];
     index += 1;
@@ -128,7 +159,6 @@ async function main(): Promise<void> {
     };
     void postEvent(event);
   };
-
   setTimeout(emitTestEvent, FIRST_EVENT_DELAY_MS);
   setInterval(emitTestEvent, EVENT_INTERVAL_MS);
   console.log(

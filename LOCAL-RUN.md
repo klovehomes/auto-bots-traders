@@ -146,8 +146,12 @@ landscape page always badges which one you're in:
 - **`sim`** — synthetic fake data, no broker, no keys. *This package
   runs in `sim`.* For learning the stack and watching the team move.
 - **`paper`** — the Alpaca **paper** account: real market data,
-  simulated money. This arrives later, once your Alpaca paper API keys
-  exist and go into `.env`.
+  simulated money. Since v10 (Phase 1), Trendia trades this account for
+  real — her .md rules on live daily bars, Risk Gate first, entries at
+  the next market open. The other four bots stay on the simulator until
+  their strategy plugins arrive in Phase 3. Needs your Alpaca paper API
+  keys in `.env` (see below); without keys the engine says so loudly and
+  falls back to the simulator rather than pretending.
 - **`connected`** — **live** accounts and real money. VPS/production
   only, and only for bots you have individually approved to go live. In
   this build, connected mode deliberately refuses to trade live — it
@@ -166,14 +170,14 @@ engine → API → WebSocket → page pipeline, the trade-stream format with
 green/red PnL, and the UI plumbing. This is the Phase 0 scaffold from
 `PLAN.md`, running exactly as designed.
 
-**Fake, stand-ins only:** the market itself. Prices are a seeded random
-walk generated inside the engine; fills are imaginary; and the "activity
-generators" that decide when each bot buys or sells are simple scripts
-written in each bot's voice — they are **not** the real strategies. The
-real signal logic (Trendia's breakout engine, Snapback's mean reversion,
-Vega's and Wesley's options logic, PolyCrypt9000's two sleeves) arrives in
-Phase 1 and later, along with Alpaca paper trading.
+**Partly real since v10:** Trendia. In `paper` mode her strategy is the
+real thing — Alpaca daily bars, her actual rules from `trendia.md`, the
+Risk Gate enforcing her risk block before every order, full decision
+records on the stream, and real (paper) orders you can cross-check in
+the Alpaca dashboard. The other four bots still run stand-in activity
+generators on the seeded random walk; their real signal logic
+(Snapback's mean reversion, Vega's and Wesley's options logic,
+PolyCrypt9000's two sleeves) arrives in Phase 3.
 
-So treat this build as: *the building is real, the weather outside is
-painted on.* It's for getting comfortable running the stack and seeing
-your team move — not for judging how any bot would actually perform.
+So treat this build as: *the building is real, Trendia's weather is now
+real too — the rest of the team's is still painted on.*

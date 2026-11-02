@@ -372,7 +372,16 @@ Docker Compose, one command (`docker compose up`), four services:
   the web build passes. Docker's first real build happens on the VPS
   (the dev VM has no Docker).
 - **Phase 1 — First bot (week 1):** Trendia end-to-end on Alpaca paper:
-  data → signal → risk gate → order → audit log.
+  data → signal → risk gate → order → audit log. **Status: built and
+  verified 2026-11-02 (v10)** — the runner computes Trendia's rules from
+  her .md on real daily bars, writes full decision records (trigger,
+  indicator values, params snapshot, Risk Gate verdict; rejections
+  logged with no trade), sizes against her virtual $5,000 book, submits
+  market-on-open entries, manages the 7% stop / 8% trailing stop / 50DMA
+  exit against live prices, and honors the kill switch (halt cancels her
+  open orders; kill+liquidate closes her positions and reports).
+  Verified against a fake-broker harness (11 checks) + native no-key and
+  bad-key runs; the first live-paper session runs on Keith's account.
 - **Phase 1.5 — Backtester:** bar-replay harness over cached historical
   bars running the same strategy code, so Trendia, Snapback, and
   PolyCrypt9000's crypto sleeve get validated before and during paper
