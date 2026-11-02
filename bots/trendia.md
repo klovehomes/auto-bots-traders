@@ -6,7 +6,7 @@ mode: paper
 market: us_stocks
 broker: alpaca
 strategy: momentum_trend
-universe: [SPY, QQQ, AAPL, MSFT, NVDA, AMZN, META, GOOGL, AVGO, COST]
+universe: [SPY, QQQ, AAPL, MSFT, NVDA, AMZN, META, GOOGL, AVGO, COST,MRVL,AMDL,CRWD,HD,MU,PLTR,SBUX,TGT,TJX,XYZ,ZM,XLV,XLP]
 timeframe: 1Day
 schedule: evaluate at market close, trade next open
 rules:
