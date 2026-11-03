@@ -47,7 +47,7 @@ function Sparkline({ curve, color }: { curve: number[]; color: string }) {
 
 /**
  * Leaderboard tab: every bot ranked by net PnL % against the equal
- * $5,000 starting allocation. Clicking a row expands the bot's .md
+ * $10,000 starting allocation. Clicking a row expands the bot's .md
  * philosophy and its currently open positions.
  */
 export function Leaderboard({ bots, stats, haltedNames }: LeaderboardProps) {

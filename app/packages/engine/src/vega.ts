@@ -33,21 +33,30 @@ import {
  * 2026-11-03). Vega's `.md` rules, translated literally:
  *
  * - Hourly during market hours he screens a 30-symbol candidate pool:
- *   price $5–$200, 20-day ATR ≥ 3.5% of price (the IV-percentile leg of
- *   his OR-screen activates once ~60 days of self-recorded IV history
- *   exist — daily IV is recorded in state from day one).
+ *   price at or above the $5 floor with NO ceiling (Keith, 2026-11-03:
+ *   the limit belongs on the price of the option, not the stock),
+ *   20-day ATR ≥ 3.5% of price (the IV-percentile leg of his OR-screen
+ *   activates once ~60 days of self-recorded IV history exist — daily
+ *   IV is recorded in state from day one).
  * - Signal (D2): an hourly close beyond the prior 20-hour high (long
  *   calls) or low (long puts).
  * - Earnings guard (D4): no new entries within 5 days of earnings, from
  *   the Nasdaq calendar, refreshed once per ET date. FAIL-CLOSED: when
  *   the calendar is unavailable, entries pause and the pause is logged
  *   as a decision — never a silent pass.
- * - Contract pick: expiry 2–4 weeks out, |delta| closest to 0.45 inside
- *   his 0.35–0.55 band, open interest ≥ 1,000, bid/ask spread ≤ 10% of
- *   mid. A failed pick is a logged no-trade decision, before the Gate.
- * - Risk Gate: premium ≤ 6% of his virtual $5,000 book per position,
- *   max 6 positions, 3% daily loss cap. Contracts = floor(cap ÷
- *   (ask × 100)); one contract over the cap is a gate rejection.
+ * - Contract pick (Keith, 2026-11-03, replaces the 0.35–0.55 delta
+ *   band): nearest listed expiry 2–4 weeks out; the strike is the
+ *   nearest listed strike at-or-beyond 5% out of the money (calls
+ *   spot × 1.05, puts spot × 0.95). Open interest ≥ 1,000 and bid/ask
+ *   spread ≤ 10% of mid are checked on that one strike only — if it
+ *   fails, the name is rejected for the cycle (no walking the chain).
+ *   Delta is recorded in the decision record, informational only.
+ * - Premium cap, enforced at pick time: exactly 1 contract per
+ *   position, and that contract at mid (mid × 100) must cost ≤ 6% of
+ *   his virtual book — $600 on the $10,000 starting book (Keith,
+ *   2026-11-03). A pick over the cap is a logged rejection, once.
+ * - Risk Gate: max 6 positions, 3% daily loss cap, book-commitment
+ *   check — all against the same book equity the premium cap used.
  * - Orders (D5): limit at mid, one reprice after 60 s at the fresh mid,
  *   then cancel and log. Exits use close-at-market (stops must fill),
  *   triggered off live mids on the 30 s tick: +50% take profit, −35%
@@ -67,17 +76,24 @@ import {
  * (D3): he runs options-only until the mix lands.
  */
 
-const ALLOCATION = 5000;
+/**
+ * Declared starting capital for Vega's virtual books (Keith, 2026-11-03:
+ * fleet-wide doubling, $5,000 → $10,000). Persisted per book in state
+ * (startCapital / shadowStartCapital); see the boot re-seed below.
+ */
+const STARTING_CAPITAL = 10000;
+/** The only starting capital before 2026-11-03 — reads pre-doubling state files. */
+const LEGACY_STARTING_CAPITAL = 5000;
 /** Tick cadence; overridable for tests (VEGA_TICK_MS). */
 const TICK_MS =
   Number(process.env.VEGA_TICK_MS ?? process.env.PAPER_TICK_MS ?? 30_000) ||
   30_000;
 
 // Contract-selection constants, from the prose of vega.md (rules.contracts
-// / rules.options_liquidity) and scope §4 — the .md carries them as text.
-const DELTA_MIN = 0.35;
-const DELTA_MAX = 0.55;
-const DELTA_TARGET = 0.45;
+// / rules.options_liquidity) — the .md carries them as text. The strike
+// sits OTM_TARGET_PCT out of the money (Keith, 2026-11-03); there is no
+// delta band anymore.
+const OTM_TARGET_PCT = 5;
 const EXPIRY_MIN_DAYS = 14;
 const EXPIRY_MAX_DAYS = 28;
 const OI_MIN = 1000;
@@ -140,6 +156,9 @@ interface EarningsState {
 }
 
 interface VegaState {
+  /** Declared starting capital each book was seeded with (re-seed rule). */
+  startCapital: number;
+  shadowStartCapital: number;
   realizedTotal: number;
   realizedByDay: Record<string, number>;
   shadowRealizedTotal: number;
@@ -156,8 +175,8 @@ interface VegaState {
 
 interface VegaParams {
   pool: string[];
+  /** Underlying price floor — there is deliberately no ceiling (Keith, 2026-11-03). */
   priceMin: number;
-  priceMax: number;
   maxPositionPct: number;
   maxPositions: number;
   stopLossPct: number;
@@ -254,7 +273,7 @@ export interface ChainCandidate {
 }
 
 export type PickResult =
-  | { ok: true; candidate: ChainCandidate }
+  | { ok: true; candidate: ChainCandidate; targetStrike: number }
   | { ok: false; reason: string };
 
 function liquidityFailure(c: ChainCandidate): string | null {
@@ -275,18 +294,28 @@ function liquidityFailure(c: ChainCandidate): string | null {
 }
 
 /**
- * The contract pick (scope §4 step 3), pure for harness testing:
- * expiry inside the 2–4 week window, |delta| in the 0.35–0.55 band,
- * closest |delta| to 0.45 wins, liquidity gates applied in that order.
+ * The contract pick, pure for harness testing (Keith, 2026-11-03):
+ * expiry selection unchanged — the nearest listed expiry inside the
+ * 2–4 week window — then the strike nearest at-or-beyond
+ * OTM_TARGET_PCT out of the money (calls: smallest strike ≥ spot ×
+ * 1.05; puts: largest strike ≤ spot × 0.95). The liquidity gates apply
+ * to that one strike only: if it fails, the pick fails — the chain is
+ * never walked looking for a cheaper or more liquid strike. Delta
+ * plays no part in the choice; it is recorded for the decision text.
  */
 export function pickContract(
   candidates: ChainCandidate[],
   today: string,
+  direction: "call" | "put",
+  spot: number,
 ): PickResult {
   const gte = addDays(today, EXPIRY_MIN_DAYS);
   const lte = addDays(today, EXPIRY_MAX_DAYS);
   const inWindow = candidates.filter(
-    (c) => c.contract.expiry >= gte && c.contract.expiry <= lte,
+    (c) =>
+      c.contract.type === direction &&
+      c.contract.expiry >= gte &&
+      c.contract.expiry <= lte,
   );
   if (inWindow.length === 0) {
     return {
@@ -294,44 +323,40 @@ export function pickContract(
       reason: `no contracts inside the 2–4 week expiry window (${gte} → ${lte})`,
     };
   }
-  const inBand = inWindow.filter(
+  const chosenExpiry = inWindow
+    .map((c) => c.contract.expiry)
+    .sort()[0]!;
+  const targetStrike =
+    direction === "call"
+      ? spot * (1 + OTM_TARGET_PCT / 100)
+      : spot * (1 - OTM_TARGET_PCT / 100);
+  const beyond = inWindow.filter(
     (c) =>
-      c.snapshot.delta !== null &&
-      Math.abs(c.snapshot.delta) >= DELTA_MIN &&
-      Math.abs(c.snapshot.delta) <= DELTA_MAX,
+      c.contract.expiry === chosenExpiry &&
+      (direction === "call"
+        ? c.contract.strike >= targetStrike - 1e-9
+        : c.contract.strike <= targetStrike + 1e-9),
   );
-  if (inBand.length === 0) {
+  if (beyond.length === 0) {
     return {
       ok: false,
-      reason: `no contract with |delta| in the ${DELTA_MIN}–${DELTA_MAX} band inside the expiry window`,
+      reason:
+        `no ${direction} strike at-or-beyond the ${OTM_TARGET_PCT}% out-of-the-money ` +
+        `target ${money(targetStrike)} (spot ${money(spot)}) at the ${chosenExpiry} expiry`,
     };
   }
-  const sorted = [...inBand].sort(
-    (a, b) =>
-      Math.abs(Math.abs(a.snapshot.delta!) - DELTA_TARGET) -
-      Math.abs(Math.abs(b.snapshot.delta!) - DELTA_TARGET),
+  const picked = beyond.reduce((a, b) =>
+    direction === "call"
+      ? b.contract.strike < a.contract.strike
+        ? b
+        : a
+      : b.contract.strike > a.contract.strike
+        ? b
+        : a,
   );
-  let firstFailure: string | null = null;
-  for (const cand of sorted) {
-    const fail = liquidityFailure(cand);
-    if (fail === null) return { ok: true, candidate: cand };
-    if (firstFailure === null) firstFailure = fail;
-  }
-  return {
-    ok: false,
-    reason: firstFailure ?? "no liquid contract in the delta band",
-  };
-}
-
-/**
- * Position sizing (scope §4 step 4): whole contracts whose total
- * premium at the ask fits the dollar cap. 0 means one contract alone
- * already exceeds the cap — a Risk Gate rejection.
- */
-export function sizeContracts(ask: number, capDollars: number): number {
-  const perContract = ask * 100;
-  if (!(perContract > 0) || !(capDollars > 0)) return 0;
-  return Math.floor(capDollars / perContract);
+  const fail = liquidityFailure(picked);
+  if (fail !== null) return { ok: false, reason: fail };
+  return { ok: true, candidate: picked, targetStrike };
 }
 
 export function startVegaTrader(
@@ -353,7 +378,6 @@ export function startVegaTrader(
       (v): v is string => typeof v === "string",
     ),
     priceMin: leadingNumber(bot.rules.underlying_price_min, 5),
-    priceMax: leadingNumber(bot.rules.underlying_price_max, 200),
     maxPositionPct: leadingNumber(bot.risk.max_position_pct, 6),
     maxPositions: leadingNumber(bot.risk.max_positions, 6),
     stopLossPct: leadingNumber(bot.risk.stop_loss_pct, 35),
@@ -368,6 +392,8 @@ export function startVegaTrader(
   const tickMs = deps.tickMs ?? TICK_MS;
 
   const freshState = (): VegaState => ({
+    startCapital: STARTING_CAPITAL,
+    shadowStartCapital: STARTING_CAPITAL,
     realizedTotal: 0,
     realizedByDay: {},
     shadowRealizedTotal: 0,
@@ -388,12 +414,20 @@ export function startVegaTrader(
   });
 
   let state: VegaState = freshState();
+  let persistedRaw: Partial<VegaState> | null = null;
   try {
     if (existsSync(statePath)) {
-      state = {
-        ...freshState(),
-        ...(JSON.parse(readFileSync(statePath, "utf8")) as VegaState),
-      };
+      persistedRaw = JSON.parse(readFileSync(statePath, "utf8")) as VegaState;
+      state = { ...freshState(), ...persistedRaw };
+      // State files written before the startCapital fields existed were
+      // seeded at the legacy $5,000 — say so explicitly, or the merge
+      // above would silently dress an old book in the new capital.
+      if (typeof persistedRaw.startCapital !== "number") {
+        state.startCapital = LEGACY_STARTING_CAPITAL;
+      }
+      if (typeof persistedRaw.shadowStartCapital !== "number") {
+        state.shadowStartCapital = LEGACY_STARTING_CAPITAL;
+      }
       console.log(`[vega] ${bot.name}: restored state from ${statePath}`);
     }
   } catch (err) {
@@ -416,10 +450,73 @@ export function startVegaTrader(
     }
   };
 
+  // ---- Boot re-seed (Keith, 2026-11-03) --------------------------------
+  // If the declared starting capital changed since a book was seeded,
+  // an UNTOUCHED book (no realized PnL, no open contracts, no pending
+  // exits — realized totals all zero means equity sat exactly at the
+  // old start) re-seeds to the new capital and logs it. A touched book
+  // keeps its original start and logs the skip: doubling a book that
+  // already has a track record would rewrite its percentages. Pending
+  // unfilled entry orders do not block a re-seed and are left alone.
+  // Each book (live / shadow) is judged on its own ledger.
+  if (persistedRaw !== null) {
+    const allZero = (byDay: Record<string, number>): boolean =>
+      Object.values(byDay).every((v) => v === 0);
+    let dirty = false;
+    const reseed = (
+      label: string,
+      persisted: number,
+      apply: (v: number) => void,
+      untouched: boolean,
+      touchedWhy: string,
+    ): void => {
+      if (persisted === STARTING_CAPITAL) return;
+      dirty = true;
+      if (untouched) {
+        apply(STARTING_CAPITAL);
+        console.log(
+          `[vega] ${bot.name}: ${label} re-seeded ${money(persisted)} → ${money(STARTING_CAPITAL)} (starting capital changed; book was untouched)`,
+        );
+      } else {
+        console.log(
+          `[vega] ${bot.name}: starting capital changed ${money(persisted)} → ${money(STARTING_CAPITAL)} but the ${label} is not untouched (${touchedWhy}) — resize skipped, book keeps its ${money(persisted)} start`,
+        );
+      }
+    };
+    reseed(
+      "book",
+      state.startCapital,
+      (v) => {
+        state.startCapital = v;
+      },
+      state.realizedTotal === 0 &&
+        allZero(state.realizedByDay) &&
+        Object.keys(state.contracts).length === 0 &&
+        state.pendingExits.length === 0,
+      `realized ${money(state.realizedTotal)}, ${Object.keys(state.contracts).length} open contract(s), ${state.pendingExits.length} pending exit(s)`,
+    );
+    reseed(
+      "shadow book",
+      state.shadowStartCapital,
+      (v) => {
+        state.shadowStartCapital = v;
+      },
+      state.shadowRealizedTotal === 0 &&
+        allZero(state.shadowRealizedByDay) &&
+        Object.keys(state.shadowContracts).length === 0,
+      `realized ${money(state.shadowRealizedTotal)}, ${Object.keys(state.shadowContracts).length} open shadow contract(s)`,
+    );
+    if (dirty) save();
+  }
+
   const book = (): Record<string, TrackedContract> =>
     shadow ? state.shadowContracts : state.contracts;
+  /** The starting capital of the ACTIVE mode's book (premium/loss caps base). */
+  const startCapital = (): number =>
+    shadow ? state.shadowStartCapital : state.startCapital;
   const bookEquity = (): number =>
-    ALLOCATION + (shadow ? state.shadowRealizedTotal : state.realizedTotal);
+    startCapital() +
+    (shadow ? state.shadowRealizedTotal : state.realizedTotal);
   const realizedToday = (): number =>
     (shadow ? state.shadowRealizedByDay : state.realizedByDay)[etDate(now())] ??
     0;
@@ -463,8 +560,8 @@ export function startVegaTrader(
   };
 
   const paramsSnapshot = (): string =>
-    `params snapshot: pool ${params.pool.length} symbols, price band ${money(params.priceMin)}–${money(params.priceMax)}, ` +
-    `ATR(${ATR_PERIOD}) ≥ ${ATR_MIN_PCT}% of price, delta band ${DELTA_MIN}–${DELTA_MAX}, expiry ${EXPIRY_MIN_DAYS}–${EXPIRY_MAX_DAYS} days, ` +
+    `params snapshot: pool ${params.pool.length} symbols, price floor ${money(params.priceMin)} with no price ceiling, ` +
+    `ATR(${ATR_PERIOD}) ≥ ${ATR_MIN_PCT}% of price, strike ${OTM_TARGET_PCT}% out of the money (nearest listed at-or-beyond), exactly 1 contract per position, expiry ${EXPIRY_MIN_DAYS}–${EXPIRY_MAX_DAYS} days, ` +
     `OI ≥ ${OI_MIN.toLocaleString("en-US")}, spread ≤ ${SPREAD_MAX_PCT}% of mid, premium cap ${params.maxPositionPct}% of book, ` +
     `max_positions ${params.maxPositions}, stop ${params.stopLossPct}%, take_profit ${params.takeProfitPct}%, ` +
     `time_stop ${params.timeStopDays} trading days, daily_loss_cap ${params.maxDailyLossPct}%, earnings guard ${EARNINGS_GUARD_DAYS} days`;
@@ -541,16 +638,23 @@ export function startVegaTrader(
   }
 
   /** Record one IV observation per underlying per ET date (§5). */
-  function recordIv(underlying: string, candidates: ChainCandidate[]): void {
+  function recordIv(
+    underlying: string,
+    candidates: ChainCandidate[],
+    targetStrike: number,
+  ): void {
     const today = etDate(now());
     const days = (state.ivByUnderlying[underlying] ??= {});
     if (days[today] !== undefined) return;
+    // The observation comes from the contract nearest the 5% OTM target
+    // strike — the strike he would actually trade (the delta-band
+    // nearest-to-0.45 choice is gone with the band).
     const withIv = candidates
-      .filter((c) => c.snapshot.iv !== null && c.snapshot.delta !== null)
+      .filter((c) => c.snapshot.iv !== null)
       .sort(
         (a, b) =>
-          Math.abs(Math.abs(a.snapshot.delta!) - DELTA_TARGET) -
-          Math.abs(Math.abs(b.snapshot.delta!) - DELTA_TARGET),
+          Math.abs(a.contract.strike - targetStrike) -
+          Math.abs(b.contract.strike - targetStrike),
       );
     const iv = withIv[0]?.snapshot.iv;
     if (iv === null || iv === undefined) return;
@@ -901,7 +1005,7 @@ export function startVegaTrader(
     let guardBlocked = 0;
 
     for (const symbol of params.pool) {
-      // ---- Screen (daily data): price band + ATR --------------------
+      // ---- Screen (daily data): price floor + ATR -------------------
       let daily: DailyBar[];
       try {
         daily = completedDailyBars(
@@ -921,7 +1025,7 @@ export function startVegaTrader(
       }
       if (atr === null) continue;
       const atrPct = (atr / price) * 100;
-      if (price < params.priceMin || price > params.priceMax) continue;
+      if (price < params.priceMin) continue;
       if (atrPct < ATR_MIN_PCT) continue;
       screenedIn += 1;
 
@@ -956,7 +1060,7 @@ export function startVegaTrader(
           : `hourly breakdown: last completed hour closed ${money(lastBar.close)}, below the prior 20-hour low ${money(level)}`;
       const screenText =
         `${signalText}; ATR(${ATR_PERIOD}) ${atrPct.toFixed(1)}% of price ${money(price)} (min ${ATR_MIN_PCT}%); ` +
-        `price inside the ${money(params.priceMin)}–${money(params.priceMax)} band`;
+        `price at or above the ${money(params.priceMin)} floor (no price ceiling)`;
 
       // One options position per underlying at a time (diversification
       // across the pool; his file caps positions, not per-name stacks).
@@ -1047,8 +1151,12 @@ export function startVegaTrader(
       const candidates: ChainCandidate[] = contracts
         .filter((c) => snapshots.has(c.symbol))
         .map((c) => ({ contract: c, snapshot: snapshots.get(c.symbol)! }));
-      recordIv(symbol, candidates);
-      const pick = pickContract(candidates, today);
+      const pickTarget =
+        direction === "call"
+          ? price * (1 + OTM_TARGET_PCT / 100)
+          : price * (1 - OTM_TARGET_PCT / 100);
+      recordIv(symbol, candidates, pickTarget);
+      const pick = pickContract(candidates, today, direction, price);
       if (!pick.ok) {
         rejected += 1;
         emit({
@@ -1063,33 +1171,57 @@ export function startVegaTrader(
         continue;
       }
       const { contract, snapshot } = pick.candidate;
+      // The pick's liquidity gates guarantee a two-sided quote.
+      const mid = snapshot.mid!;
+      const premiumDollars = mid * 100; // exactly 1 contract
       const contractText =
         `contract ${contract.symbol}: ${symbol} ${contract.strike} ${direction}, exp ${contract.expiry}, ` +
-        `delta ${snapshot.delta!.toFixed(2)}, IV ${snapshot.iv !== null ? `${(snapshot.iv * 100).toFixed(0)}%` : "n/a"}, ` +
-        `OI ${contract.openInterest.toLocaleString("en-US")}, bid ${snapshot.bid.toFixed(2)} / ask ${snapshot.ask.toFixed(2)} / mid ${snapshot.mid!.toFixed(2)}`;
+        `strike ${OTM_TARGET_PCT}% out of the money (spot ${money(price)}, target ${money(pick.targetStrike)}), ` +
+        `delta ${snapshot.delta !== null ? snapshot.delta.toFixed(2) : "n/a"}, IV ${snapshot.iv !== null ? `${(snapshot.iv * 100).toFixed(0)}%` : "n/a"}, ` +
+        `OI ${contract.openInterest.toLocaleString("en-US")}, bid ${snapshot.bid.toFixed(2)} / ask ${snapshot.ask.toFixed(2)} / mid ${mid.toFixed(2)}`;
+
+      // ---- Premium cap (enforced at pick time, Keith 2026-11-03) ------
+      // Exactly 1 contract per position; that contract at mid must cost
+      // ≤ maxPositionPct% of the book ($600 on the $10,000 start). This
+      // is the cap check — the Risk Gate below uses the same book equity
+      // and never re-litigates premium, so an over-cap pick produces
+      // exactly one rejection record.
+      const capDollars = bookEquity() * (params.maxPositionPct / 100);
+      if (premiumDollars > capDollars + 1e-9) {
+        rejected += 1;
+        emit({
+          type: "signal",
+          symbol: contract.symbol,
+          side: "buy",
+          qty: 1,
+          price: round2(snapshot.ask),
+          pnl: null,
+          reason:
+            `${tag} · ENTRY signal — ${screenText} · ${contractText} · Risk Gate: REJECTED — ` +
+            `premium cap: one contract at mid ${money(mid)} costs ${money(premiumDollars)}, over the ${params.maxPositionPct}% premium cap (${money(capDollars)} of the ${money(bookEquity())} book) · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
 
       // ---- Risk Gate ---------------------------------------------------
       const openCount =
         Object.keys(book()).length + (shadow ? 0 : state.pendingEntries.length);
-      const capDollars = bookEquity() * (params.maxPositionPct / 100);
-      const qty = sizeContracts(snapshot.ask, capDollars);
+      const qty = 1;
       const committed = Object.values(book()).reduce(
         (sum, p) => sum + p.entryPremium * p.qty * 100,
         0,
       );
-      const estPremium = qty * snapshot.ask * 100;
+      const estPremium = premiumDollars;
       const dailyCapHit =
-        realizedToday() <= -((params.maxDailyLossPct / 100) * ALLOCATION);
+        realizedToday() <= -((params.maxDailyLossPct / 100) * startCapital());
 
       let verdict: string | null = null;
       if (dailyCapHit) {
-        verdict = `daily loss cap hit — realized ${money(realizedToday())} today vs cap ${money(-((params.maxDailyLossPct / 100) * ALLOCATION))}`;
+        verdict = `daily loss cap hit — realized ${money(realizedToday())} today vs cap ${money(-((params.maxDailyLossPct / 100) * startCapital()))}`;
       } else if (openCount >= params.maxPositions) {
         verdict = `max positions reached (${openCount}/${params.maxPositions})`;
-      } else if (qty < 1) {
-        verdict = `one contract at the ask (${money(snapshot.ask * 100)}) exceeds the ${params.maxPositionPct}% premium cap (${money(capDollars)})`;
       } else if (committed + estPremium > bookEquity()) {
-        verdict = `the $5,000 book is fully committed (${money(committed)} open premium + ${money(estPremium)} new > ${money(bookEquity())})`;
+        verdict = `the book is fully committed (${money(committed)} open premium + ${money(estPremium)} new > ${money(bookEquity())} book equity)`;
       }
 
       if (verdict !== null) {
@@ -1106,7 +1238,6 @@ export function startVegaTrader(
         continue;
       }
 
-      const mid = snapshot.mid!;
       const decisionId = emit({
         type: "signal",
         symbol: contract.symbol,
@@ -1116,7 +1247,7 @@ export function startVegaTrader(
         pnl: null,
         reason:
           `${tag} · ENTRY signal — ${screenText} · ${contractText} · Risk Gate: APPROVED — ` +
-          `${qty} contract(s) ≈ ${money(qty * mid * 100)} premium at mid (cap ${money(capDollars)} = ${params.maxPositionPct}% of the ${money(bookEquity())} book); ` +
+          `${qty} contract ≈ ${money(premiumDollars)} premium at mid (cap ${money(capDollars)} = ${params.maxPositionPct}% of the ${money(bookEquity())} book); ` +
           `positions ${openCount}/${params.maxPositions}; earnings clear · ${paramsSnapshot()} · ` +
           (shadow
             ? "order intent ONLY — shadow mode places no broker orders"
@@ -1391,7 +1522,7 @@ export function startVegaTrader(
 
   console.log(
     `[vega] ${bot.name}: Phase 3 ${shadow ? "SHADOW" : "live-paper"} runner started — pool ${params.pool.join("/")}, ` +
-      `book ${money(ALLOCATION)}, hourly screen + breakout evaluation in market hours` +
+      `book ${money(bookEquity())}, hourly screen + breakout evaluation in market hours` +
       (shadow
         ? "; VEGA_SHADOW is on — full pipeline, decision/order-intent events only, NO broker orders"
         : "; entries limit-at-mid with one reprice"),

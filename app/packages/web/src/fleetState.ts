@@ -8,8 +8,11 @@ import type { BotConfig, FleetEvent } from "@fleet/shared/types";
  * browser has seen since it connected. Reloading the page resets them.
  */
 
-/** Equal starting allocation decided 2026-10-30: $5,000/bot paper (sim matches). */
-export const START_EQUITY = 5000;
+/**
+ * Equal starting allocation: $5,000/bot paper as decided 2026-10-30,
+ * doubled to $10,000/bot by Keith on 2026-11-03 (sim matches).
+ */
+export const START_EQUITY = 10000;
 
 export interface OpenPosition {
   key: string;

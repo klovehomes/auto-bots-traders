@@ -35,9 +35,10 @@ import { priorHigh, rsiWilder, sma, type DailyBar } from "./indicators.js";
  *   position %, max positions, the daily loss cap, and the kill switch
  *   (halted = no order flow; pending orders cancelled; kill+liquidate
  *   closes this bot's positions and reports honestly).
- * - Money: Trendia trades a virtual $5,000 book (the decided paper
- *   allocation) inside the shared paper account. Sizing and the loss cap
- *   are computed against the book, never the account's $100k.
+ * - Money: Trendia trades a virtual $10,000 book (the decided paper
+ *   allocation — $5,000 originally, doubled fleet-wide by Keith on
+ *   2026-11-03) inside the shared paper account. Sizing and the loss
+ *   cap are computed against the book, never the account's $100k.
  * - Schedule per the .md: evaluate on completed daily bars, entries fill
  *   at the next market open (time_in_force "opg").
  *
@@ -46,7 +47,14 @@ import { priorHigh, rsiWilder, sma, type DailyBar } from "./indicators.js";
  * the broker instead of forgetting open positions.
  */
 
-const ALLOCATION = 5000;
+/**
+ * Declared starting capital for Trendia's virtual book (Keith,
+ * 2026-11-03: fleet-wide doubling, $5,000 → $10,000). Persisted in
+ * state as startCapital; see the boot re-seed below.
+ */
+const STARTING_CAPITAL = 10000;
+/** The only starting capital before 2026-11-03 — reads pre-doubling state files. */
+const LEGACY_STARTING_CAPITAL = 5000;
 const TRAILING_STOP_PCT = 8; // rules.exit prose in trendia.md
 /** Tick cadence; overridable for tests (PAPER_TICK_MS). */
 const TICK_MS = Number(process.env.PAPER_TICK_MS ?? 30_000) || 30_000;
@@ -84,6 +92,8 @@ interface PendingExit {
 }
 
 interface PaperState {
+  /** Declared starting capital this book was seeded with (re-seed rule). */
+  startCapital: number;
   realizedTotal: number;
   realizedByDay: Record<string, number>;
   entries: Record<string, TrackedEntry>;
@@ -153,6 +163,7 @@ export function startPaperTrader(
     process.env.PAPER_STATE_PATH ?? "data/paper-trendia-state.json";
 
   const freshState = (): PaperState => ({
+    startCapital: STARTING_CAPITAL,
     realizedTotal: 0,
     realizedByDay: {},
     entries: {},
@@ -163,9 +174,17 @@ export function startPaperTrader(
   });
 
   let state: PaperState = freshState();
+  let persistedRaw: Partial<PaperState> | null = null;
   try {
     if (existsSync(statePath)) {
-      state = { ...freshState(), ...(JSON.parse(readFileSync(statePath, "utf8")) as PaperState) };
+      persistedRaw = JSON.parse(readFileSync(statePath, "utf8")) as PaperState;
+      state = { ...freshState(), ...persistedRaw };
+      // State files written before the startCapital field existed were
+      // seeded at the legacy $5,000 — say so explicitly, or the merge
+      // above would silently dress an old book in the new capital.
+      if (typeof persistedRaw.startCapital !== "number") {
+        state.startCapital = LEGACY_STARTING_CAPITAL;
+      }
       console.log(`[paper] ${bot.name}: restored state from ${statePath}`);
     }
   } catch (err) {
@@ -182,7 +201,35 @@ export function startPaperTrader(
     }
   };
 
-  const bookEquity = (): number => ALLOCATION + state.realizedTotal;
+  // ---- Boot re-seed (Keith, 2026-11-03) --------------------------------
+  // If the declared starting capital changed since this book was
+  // seeded, an UNTOUCHED book (equity exactly at the old start — i.e.
+  // zero realized PnL — with no filled positions tracked and no
+  // pending exits) re-seeds to the new capital and logs it. A touched
+  // book keeps its original start and logs the skip: resizing a book
+  // with a track record would rewrite its percentages. Pending
+  // unfilled entry orders do not block a re-seed and are left alone.
+  if (persistedRaw !== null && state.startCapital !== STARTING_CAPITAL) {
+    const untouched =
+      state.realizedTotal === 0 &&
+      Object.values(state.realizedByDay).every((v) => v === 0) &&
+      Object.keys(state.entries).length === 0 &&
+      state.pendingExits.length === 0;
+    if (untouched) {
+      const from = state.startCapital;
+      state.startCapital = STARTING_CAPITAL;
+      console.log(
+        `[paper] ${bot.name}: book re-seeded ${money(from)} → ${money(STARTING_CAPITAL)} (starting capital changed; book was untouched)`,
+      );
+    } else {
+      console.log(
+        `[paper] ${bot.name}: starting capital changed ${money(state.startCapital)} → ${money(STARTING_CAPITAL)} but the book is not untouched (realized ${money(state.realizedTotal)}, ${Object.keys(state.entries).length} open position(s), ${state.pendingExits.length} pending exit(s)) — resize skipped, book keeps its ${money(state.startCapital)} start`,
+      );
+    }
+    save();
+  }
+
+  const bookEquity = (): number => state.startCapital + state.realizedTotal;
   const realizedToday = (): number => state.realizedByDay[etDate()] ?? 0;
 
   const emit = (
@@ -406,7 +453,7 @@ export function startPaperTrader(
       const openCount =
         Object.keys(state.entries).length + state.pendingEntries.length;
       const dailyCapHit =
-        realizedToday() <= -((params.maxDailyLossPct / 100) * ALLOCATION);
+        realizedToday() <= -((params.maxDailyLossPct / 100) * state.startCapital);
       const committed = Object.values(state.entries).reduce(
         (sum, e) => sum + e.entryPrice * e.qty,
         0,
@@ -419,13 +466,13 @@ export function startPaperTrader(
       if (!regimeOk) {
         verdict = `SPY is not in an uptrend (close ${money(spyLast)} vs 200DMA ${spy200 ? money(spy200) : "n/a"}) — cash is a position`;
       } else if (dailyCapHit) {
-        verdict = `daily loss cap hit — realized ${money(realizedToday())} today vs cap ${money(-((params.maxDailyLossPct / 100) * ALLOCATION))}`;
+        verdict = `daily loss cap hit — realized ${money(realizedToday())} today vs cap ${money(-((params.maxDailyLossPct / 100) * state.startCapital))}`;
       } else if (openCount >= params.maxPositions) {
         verdict = `max positions reached (${openCount}/${params.maxPositions})`;
       } else if (qty < 1) {
         verdict = `one share (${money(last.close)}) exceeds the ${params.maxPositionPct}% position cap (${money(target)})`;
       } else if (committed + estCost > bookEquity()) {
-        verdict = `the $5,000 book is fully committed (${money(committed)} open + ${money(estCost)} new > ${money(bookEquity())})`;
+        verdict = `the ${money(state.startCapital)} book is fully committed (${money(committed)} open + ${money(estCost)} new > ${money(bookEquity())})`;
       }
 
       if (verdict !== null) {
@@ -582,7 +629,7 @@ export function startPaperTrader(
 
   console.log(
     `[paper] ${bot.name}: Phase 1 live-paper runner started — universe ${params.universe.join("/")}, ` +
-      `book ${money(ALLOCATION)}, evaluating daily bars, entries at next open`,
+      `book ${money(bookEquity())}, evaluating daily bars, entries at next open`,
   );
   void tick();
   setInterval(() => void tick(), TICK_MS);

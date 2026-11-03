@@ -11,8 +11,9 @@ import type { BotConfig, FleetEvent } from "@fleet/shared";
  * How it works:
  * - A seeded RNG (mulberry32, fixed seed) drives a random walk per symbol,
  *   so runs are reproducible.
- * - Each bot keeps a small in-memory position book and starts with $5,000
- *   of sim equity (the decided paper allocation).
+ * - Each bot keeps a small in-memory position book and starts with $10,000
+ *   of sim equity (the decided paper allocation — $5,000 originally,
+ *   doubled fleet-wide by Keith on 2026-11-03).
  * - Every ~4–8s (staggered per bot) one bot opens or closes a position and
  *   the event goes through the exact same /internal/events pipeline and
  *   FleetEvent schema as real trading will.
@@ -35,7 +36,7 @@ import type { BotConfig, FleetEvent } from "@fleet/shared";
  * position book, reporting results back to the API.
  */
 
-const SIM_START_EQUITY = 5000;
+const SIM_START_EQUITY = 10000;
 const FALLBACK_MAX_POSITION_PCT = 10;
 const FALLBACK_MAX_POSITIONS = 5;
 const PRICE_TICK_MS = 1000;
@@ -284,7 +285,7 @@ export function startSimulator(
       ? Math.max(1, Math.floor(spot * (0.9 + rng() * 0.05)))
       : Math.max(1, Math.ceil(spot * (1.05 + rng() * 0.05)));
     const premium = round2(strike * (0.01 + rng() * 0.008));
-    // The wheel trades in 100-share blocks; at $5k sim equity that is one
+    // The wheel trades in 100-share blocks; at $10k sim equity that is one
     // contract for most strikes in Wesley's $5–$55 band.
     const contracts = Math.max(1, Math.floor(budget(state) / (strike * 100)));
     const label = `${underlying} ${strike}${isPut ? "P" : "C"} ${expiry} (${isPut ? "CSP" : "CC"})`;

@@ -13,11 +13,10 @@ timeframe: 1Hour
 schedule: evaluate hourly during market hours, weekdays 09:30–16:00 ET
 rules:
   underlying_price_min: 5
-  underlying_price_max: 200
   volatility_screen: 20-day ATR at least 3.5% of share price, or implied-vol percentile 70+
   options_liquidity: open interest 1,000+ contracts and bid/ask spread within 10% of mid
   holdings_mix: 75% of invested capital in options, 25% in shares of the same underlyings (rebalance band 70–80%)
-  contracts: long calls on bullish breakouts, long puts on bearish breakdowns; delta 0.35–0.55; expiry 2–4 weeks out
+  contracts: long calls on bullish breakouts, long puts on bearish breakdowns; strike 5% out of the money (nearest listed strike at-or-beyond 5% OTM); exactly one contract per position; expiry 2–4 weeks out
   earnings_guard: no new entries within 5 days of the underlying's earnings report
 risk:
   max_position_pct: 6 (premium paid per options position)
@@ -35,14 +34,15 @@ viz:
 # Vega — the storm rider
 
 The other bots fear volatility. I eat it. Every day I screen the market for
-stocks and ETFs priced between $5 and $200 a share that actually move —
+stocks and ETFs priced at $5 a share or more that actually move —
 high ATR, hot implied volatility, options chains liquid enough to get in
 and out cleanly — and I hunt breakouts in names the rest of the team
-won't touch.
+won't touch. There is no ceiling on the share price: the limit belongs on
+the price of the option, not the stock.
 
 Three quarters of my book is options: long calls when a volatile name
-breaks up, long puts when it breaks down, struck near the money with two
-to four weeks of life. The remaining quarter sits in shares of the same
+breaks up, long puts when it breaks down, struck 5% out of the money with
+two to four weeks of life, one contract at a time. The remaining quarter sits in shares of the same
 underlyings — ballast and hedge in one. I never sell naked premium: every
 position is defined-risk, and the most I can lose on a contract is the
 premium I paid for it.

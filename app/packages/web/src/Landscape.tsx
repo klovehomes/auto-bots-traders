@@ -87,16 +87,16 @@ function heightForEquity(equity: number): number {
 
 /**
  * DEMO-ONLY height spread, enabled with ?demoheights=1. Sim equities
- * hover within a few dollars of $5,000, so real height differences are
+ * hover within a few dollars of $10,000, so real height differences are
  * invisible; this fixed spread (display only — heights + name plates)
  * exists purely for screenshots and demos. Real data is never touched.
  */
 const DEMO_EQUITIES: Record<string, number> = {
-  polycrypt9000: 2500,
-  snapback: 4800,
-  trendia: 7500,
-  vega: 10000,
-  wesley: 3800,
+  polycrypt9000: 5000,
+  snapback: 9600,
+  trendia: 15000,
+  vega: 20000,
+  wesley: 7600,
 };
 
 function fitFont(

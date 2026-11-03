@@ -81,7 +81,7 @@ What you should see:
   will use.
 
 Leave it running a while and the feed keeps churning; each bot is working
-from a $5,000 simulated account.
+from a $10,000 simulated account.
 
 ## 6. Stop it
 

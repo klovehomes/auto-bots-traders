@@ -268,7 +268,8 @@ decision highlights the trades it produced.
 Every bot — Keith's five and any approved outsider bot — starts with the
 **same dollar amount**: one system config value, `starting_allocation_usd`
 (decided 2026-10-30: **$5,000 per bot in paper mode, $500 per bot when a bot
-goes live**). The engine keeps a
+goes live**; the paper allocation was **doubled to $10,000 per bot by Keith
+on 2026-11-03**). The engine keeps a
 virtual sub-ledger per bot inside the single Alpaca paper account and
 enforces each bot's budget independently, so "same start" is real, not
 cosmetic. Leaderboard ranks on % return so it stays fair even if the
@@ -376,7 +377,7 @@ Docker Compose, one command (`docker compose up`), four services:
   verified 2026-11-02 (v10)** — the runner computes Trendia's rules from
   her .md on real daily bars, writes full decision records (trigger,
   indicator values, params snapshot, Risk Gate verdict; rejections
-  logged with no trade), sizes against her virtual $5,000 book, submits
+  logged with no trade), sizes against her virtual $10,000 book, submits
   market-on-open entries, manages the 7% stop / 8% trailing stop / 50DMA
   exit against live prices, and honors the kill switch (halt cancels her
   open orders; kill+liquidate closes her positions and reports).
@@ -453,7 +454,10 @@ fine on Alpaca, so no change to the current plan.
    gold-plate the first cut.
 5. **Starting allocation per bot — DECIDED (2026-10-30):** $5,000 per bot
    in paper mode; $500 per bot when a bot goes live. One config value per
-   phase; every bot gets exactly the same.
+   phase; every bot gets exactly the same. **UPDATED (Keith, 2026-11-03):**
+   the paper starting book is doubled to **$10,000 per bot** (percentages
+   unchanged; the runners re-seed untouched books at boot and leave
+   touched books at their original start).
 6. **Submissions:** open to the public at launch, or invite-only until the
    system has a track record?
 7. **Engine language — DECIDED (2026-10-30): TypeScript.** Keith's call:

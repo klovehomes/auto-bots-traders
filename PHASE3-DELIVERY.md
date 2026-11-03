@@ -131,3 +131,35 @@ existing app-folder `.env` (keys + MODE=paper already in place),
 SHADOW mode by default — watch his `SHADOW ·` decisions in the stream
 for 2–3 trading days, then flip `VEGA_SHADOW=false` + `docker compose
 up -d` when you're satisfied with his picks.
+
+## Amendment — 2026-11-03 (Keith): Vega's strike rule + starting books doubled
+
+Two changes directed by Keith after this delivery landed. The sections
+above stand as the record of what shipped first; this note is the delta.
+
+- **Vega's entries — the limit belongs on the option, not the stock.**
+  The $200 ceiling on the underlying's share price is gone (the $5
+  floor stays). Contract selection no longer uses the 0.35–0.55 delta
+  band: at the nearest listed expiry inside the same 2–4 week window,
+  the strike is the nearest listed strike at-or-beyond **5% out of the
+  money** (calls spot × 1.05, puts spot × 0.95). The OI ≥ 1,000 /
+  spread ≤ 10% gates apply to that one strike only — if it fails, the
+  name is rejected for the cycle; the chain is not walked. Quantity is
+  exactly **1 contract** per position, and the premium cap is enforced
+  at pick time: one contract at mid must cost ≤ 6% of his book —
+  **$600** on the doubled book below. Delta is still recorded in every
+  decision record, informational only. The harness covers the new pick
+  (including a >$200 underlying being entered, and a 5% OTM contract
+  busting the premium cap).
+- **Starting books doubled fleet-wide: $5,000 → $10,000 per bot.**
+  Percentages are unchanged, so the derived dollars move: Trendia's 20%
+  slice is $2,000, Vega's 6% premium cap is $600, Wesley's 6% daily
+  loss cap is $600. The simulator seeds at $10,000 and the dashboard's
+  starting equity matches. The two real runners (Trendia, Vega) carry
+  a persisted `startCapital` and re-seed safely at boot: if the
+  declared starting capital differs from the persisted one **and** the
+  book is untouched (no fills, no open positions, equity exactly at the
+  old start), the book re-seeds to $10,000 and logs it; a touched book
+  keeps its original start and logs the skip. Vega's shadow ledger
+  follows the same rule independently of his live book. (The same
+  amendment applies to Phase 1 / Trendia — see PHASE1-DELIVERY.md.)

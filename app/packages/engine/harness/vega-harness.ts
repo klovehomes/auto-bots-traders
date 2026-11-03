@@ -4,9 +4,12 @@
  * only the broker client, the earnings calendar, the clock and the
  * state path substituted. Covers the scope §8 checklist:
  *
- *   1. contract pick lands in the delta band + expiry window
- *   2. liquidity rejects (open interest, bid/ask spread)
- *   3. sizing at the 6% premium cap incl. the too-expensive reject
+ *   1. contract pick lands on the 5% OTM strike at the nearest expiry
+ *      in the window (Keith 2026-11-03 — no delta band anymore)
+ *   2. liquidity rejects (open interest, bid/ask spread) — checked on
+ *      the picked strike only; the chain is never walked
+ *   3. premium cap at pick time: exactly 1 contract; one contract over
+ *      the 6%-of-book cap ($600 on the $10,000 book) is rejected once
  *   4. take-profit / stop-loss / time-stop / expiry-guardrail exits
  *   5. earnings guard blocks a name 2 days out; calendar-down fails closed
  *   6. Risk Gate rejections (premium cap, daily loss cap)
@@ -16,6 +19,10 @@
  *  10. limit-at-mid entry with the 60 s reprice-then-cancel rule (D5)
  *  11. shadow mode places NO broker orders but tracks a shadow book
  *  12. no order reaches the broker without a prior decision record
+ *  13. no underlying price ceiling: a >$200 name with a fitting
+ *      contract is entered
+ *  14. boot re-seed: an untouched pre-doubling book re-seeds to
+ *      $10,000; a touched book keeps its $5,000 start
  *
  * Run: npx tsx harness/vega-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -38,7 +45,6 @@ import type { DailyBar, TimedBar } from "../src/indicators.js";
 import {
   parseOccSymbol,
   pickContract,
-  sizeContracts,
   startVegaTrader,
   tradingDaysBetween,
   type ChainCandidate,
@@ -63,7 +69,7 @@ const vegaBot: BotConfig = {
   strategy: "options_volatility",
   viz: { color: "#f472b6", form: "avatar_disc", avatar_accessory: "star shades" },
   candidate_pool: POOL,
-  rules: { underlying_price_min: 5, underlying_price_max: 200 },
+  rules: { underlying_price_min: 5 },
   risk: {
     // Exactly as gray-matter reads bots/vega.md (prose and all).
     max_position_pct: "6 (premium paid per options position)",
@@ -179,7 +185,11 @@ function snapshot(
   };
 }
 
-/** A healthy AMD call chain inside the window, deltas 0.30 / 0.44 / 0.52. */
+/**
+ * A healthy AMD call chain inside the window: strikes 100 / 105 / 115.
+ * Spot is $100 in the harness, so the 5% OTM target is 105 — the middle
+ * strike (AMD_CALL) is the pick under the 2026-11-03 strike rule.
+ */
 function amdChain(broker: FakeBroker): void {
   const c30 = occ("AMD", "261120", "C", 115);
   const c52 = occ("AMD", "261120", "C", 100);
@@ -357,7 +367,7 @@ function boot(opts: {
   }
   const broker = new FakeBroker();
   broker.dailyBars.set("AMD", amdDailyBars());
-  broker.latestPrices.set("AMD", 104);
+  broker.latestPrices.set("AMD", 100);
   opts.setup?.(broker);
   const control = new FakeControl();
   const events: FleetEvent[] = [];
@@ -396,36 +406,62 @@ async function main(): Promise<void> {
   {
     const today = "2026-11-04";
     const mk = (
-      sym: string, expiry: string, delta: number | null,
+      sym: string, expiry: string, strike: number,
       oi: number, bid: number, ask: number,
+      delta: number | null = 0.4, type: "call" | "put" = "call",
     ): ChainCandidate => ({
-      contract: contract(sym, "AMD", "call", 100, expiry, oi),
+      contract: contract(sym, "AMD", type, strike, expiry, oi),
       snapshot: snapshot(sym, bid, ask, delta),
     });
-    const inBand = mk("C1", "2026-11-20", 0.44, 5000, 1.9, 2.1);
-    const edge = mk("C2", "2026-11-20", 0.52, 5000, 2.9, 3.1);
-    const outBand = mk("C3", "2026-11-20", 0.3, 5000, 0.9, 1.1);
-    const pick = pickContract([outBand, edge, inBand], today);
-    check("pick: closest |delta| to 0.45 inside the band wins", pick.ok && pick.candidate.contract.symbol === "C1");
-    const tooSoon = mk("C4", "2026-11-10", 0.45, 5000, 1.9, 2.1);
-    const tooLate = mk("C5", "2026-12-20", 0.45, 5000, 1.9, 2.1);
-    const windowPick = pickContract([tooSoon, tooLate], today);
+    // Calls on spot $100 → target strike $105 (5% OTM).
+    const belowTarget = mk("C0", "2026-11-20", 100, 5000, 2.9, 3.1);
+    const atTarget = mk("C1", "2026-11-20", 105, 5000, 1.9, 2.1);
+    const farBeyond = mk("C2", "2026-11-20", 115, 5000, 0.9, 1.1);
+    const pick = pickContract([belowTarget, farBeyond, atTarget], today, "call", 100);
+    check("pick: nearest strike at-or-beyond the 5% OTM target wins (105 on spot 100)",
+      pick.ok && pick.candidate.contract.symbol === "C1");
+    const gapPick = pickContract(
+      [mk("C3", "2026-11-20", 102, 5000, 1.9, 2.1), mk("C4", "2026-11-20", 108, 5000, 1.45, 1.55)],
+      today, "call", 100);
+    check("pick: no strike exactly at target → the next strike beyond it (108)",
+      gapPick.ok && gapPick.candidate.contract.symbol === "C4");
+    const noneBeyond = pickContract(
+      [belowTarget, mk("C5", "2026-11-20", 102, 5000, 1.9, 2.1)],
+      today, "call", 100);
+    check("pick: no strike at-or-beyond target is a no-trade",
+      !noneBeyond.ok && noneBeyond.reason.includes("at-or-beyond"));
+    // Puts on spot $100 → target strike $95; largest strike ≤ 95 wins.
+    const putPick = pickContract(
+      [mk("P0", "2026-11-20", 98, 5000, 2.9, 3.1, 0.4, "put"),
+       mk("P1", "2026-11-20", 95, 5000, 1.9, 2.1, 0.4, "put"),
+       mk("P2", "2026-11-20", 90, 5000, 0.9, 1.1, 0.4, "put")],
+      today, "put", 100);
+    check("pick: puts take the largest strike at-or-below spot × 0.95 (95)",
+      putPick.ok && putPick.candidate.contract.symbol === "P1");
+    // Expiry: the nearest listed expiry inside the window is chosen.
+    const expiryPick = pickContract(
+      [mk("C6", "2026-11-27", 105, 5000, 1.9, 2.1), mk("C7", "2026-11-20", 105, 5000, 1.9, 2.1)],
+      today, "call", 100);
+    check("pick: nearest expiry inside the 2–4 week window is the chosen expiry",
+      expiryPick.ok && expiryPick.candidate.contract.symbol === "C7");
+    const tooSoon = mk("C8", "2026-11-10", 105, 5000, 1.9, 2.1);
+    const tooLate = mk("C9", "2026-12-20", 105, 5000, 1.9, 2.1);
+    const windowPick = pickContract([tooSoon, tooLate], today, "call", 100);
     check("pick: contracts outside the 2–4 week window are excluded", !windowPick.ok && windowPick.reason.includes("expiry window"));
-    const noDelta = mk("C6", "2026-11-20", 0.62, 5000, 1.9, 2.1);
-    const bandPick = pickContract([noDelta], today);
-    check("pick: delta outside 0.35–0.55 rejected", !bandPick.ok && bandPick.reason.includes("delta"));
-    const lowOiBest = mk("C7", "2026-11-20", 0.45, 200, 1.9, 2.1);
-    const oiPick = pickContract([lowOiBest, edge], today);
-    check("pick: low-OI best contract falls through to the next liquid one", oiPick.ok && oiPick.candidate.contract.symbol === "C2");
-    const oiAllBad = pickContract([lowOiBest], today);
-    check("pick: OI < 1,000 everywhere is a no-trade with an OI reason", !oiAllBad.ok && oiAllBad.reason.includes("open interest"));
-    const wide = mk("C8", "2026-11-20", 0.45, 5000, 1.6, 2.4); // spread 40% of mid
-    const spreadPick = pickContract([wide], today);
-    check("pick: spread > 10% of mid is a no-trade with a spread reason", !spreadPick.ok && spreadPick.reason.includes("spread"));
-
-    check("sizing: ask $1.00 → 3 contracts under a $300 cap", sizeContracts(1.0, 300) === 3);
-    check("sizing: ask $2.10 → 1 contract", sizeContracts(2.1, 300) === 1);
-    check("sizing: ask $3.50 → 0 (one contract exceeds the cap)", sizeContracts(3.5, 300) === 0);
+    // Liquidity applies to the picked strike ONLY — no walking the chain.
+    const illiquidPick = pickContract(
+      [mk("C10", "2026-11-20", 105, 200, 1.9, 2.1), mk("C11", "2026-11-20", 115, 8000, 0.9, 1.1)],
+      today, "call", 100);
+    check("pick: picked strike fails OI → no-trade even though a farther strike is liquid (no walking)",
+      !illiquidPick.ok && illiquidPick.reason.includes("open interest"));
+    const wide = mk("C12", "2026-11-20", 105, 5000, 1.6, 2.4); // spread 40% of mid
+    const spreadPick = pickContract([wide], today, "call", 100);
+    check("pick: spread > 10% of mid on the picked strike is a no-trade with a spread reason", !spreadPick.ok && spreadPick.reason.includes("spread"));
+    // Delta no longer gates the pick (recorded, informational only).
+    const wildDelta = pickContract([mk("C13", "2026-11-20", 105, 5000, 1.9, 2.1, 0.62)], today, "call", 100);
+    const nullDelta = pickContract([mk("C14", "2026-11-20", 105, 5000, 1.9, 2.1, null)], today, "call", 100);
+    check("pick: delta 0.62 or missing delta does not block the 5% OTM pick",
+      wildDelta.ok && nullDelta.ok);
 
     check("tradingDays: Fri → Mon counts 1", tradingDaysBetween("2026-11-06", "2026-11-09") === 1);
     check("tradingDays: Mon → next Mon counts 5", tradingDaysBetween("2026-11-02", "2026-11-09") === 5);
@@ -449,7 +485,7 @@ async function main(): Promise<void> {
       s.events.some((e) => e.type === "open" && e.reason.includes("SHADOW")));
     check("shadow: NO orders reached the broker", s.broker.createdOrders.length === 0);
     const entry = s.events.find((e) => e.type === "open" && e.symbol === AMD_CALL);
-    check("shadow: fill assumed at mid $2.00, qty 1 (6% cap ÷ $210/contract)",
+    check("shadow: fill assumed at mid $2.00, qty exactly 1 (one-contract rule, 5% OTM strike 105)",
       entry?.price === 2 && entry?.qty === 1, `price=${entry?.price} qty=${entry?.qty}`);
     // IV history recorded for the underlying (§5).
     const st = readState(s.statePath) as { ivByUnderlying?: Record<string, Record<string, number>> };
@@ -489,26 +525,35 @@ async function main(): Promise<void> {
       !s2.events.some((e) => e.type === "open"));
   }
 
-  console.log("— S3: Risk Gate — one contract over the premium cap —");
+  console.log("— S3: premium cap — the 5% OTM contract busts the cap —");
   {
     const s = boot({ shadow: true, setup: (b) => {
       b.hourlyBars.set("AMD", amdHourlyBars(T0));
-      const pricey = occ("AMD", "261120", "C", 100);
-      b.contracts.set("AMD:call", [contract(pricey, "AMD", "call", 100, "2026-11-20", 5000)]);
-      b.snapshots.set(pricey, snapshot(pricey, 3.8, 4.2, 0.45));
+      // Only the 5% OTM strike (105 on spot 100) is listed; it is liquid
+      // (OI 5,000, spread ~6% of mid) but one contract at mid $6.60
+      // costs $660 — over the $600 cap (6% of the $10,000 book).
+      b.contracts.set("AMD:call", [contract(AMD_CALL, "AMD", "call", 105, "2026-11-20", 5000)]);
+      b.snapshots.set(AMD_CALL, snapshot(AMD_CALL, 6.4, 6.8, 0.38));
     } });
     await until("cap rejection", () =>
       s.events.some((e) => e.reason.includes("premium cap")));
-    check("gate: $420/contract vs $300 cap → REJECTED decision, no position",
+    check("cap: $660/contract vs $600 cap → REJECTED decision, no position",
       s.events.some((e) => e.reason.includes("Risk Gate: REJECTED")) &&
       !s.events.some((e) => e.type === "open"));
+    check("cap: the over-cap pick is rejected exactly once",
+      s.events.filter((e) => e.reason.includes("premium cap")).length === 1,
+      JSON.stringify(s.events.map((e) => e.reason)));
   }
 
   console.log("— S4: Risk Gate — daily loss cap —");
   {
     const s = boot({
       shadow: true,
-      seedState: { shadowRealizedTotal: -160, shadowRealizedByDay: { "2026-11-04": -160 } },
+      seedState: {
+        shadowStartCapital: 10000,
+        shadowRealizedTotal: -310,
+        shadowRealizedByDay: { "2026-11-04": -310 },
+      },
       setup: (b) => {
         b.hourlyBars.set("AMD", amdHourlyBars(T0));
         amdChain(b);
@@ -516,7 +561,7 @@ async function main(): Promise<void> {
     });
     await until("daily-loss rejection", () =>
       s.events.some((e) => e.reason.includes("daily loss cap hit")));
-    check("gate: realized −$160 vs −$150 cap → entries rejected, no position",
+    check("gate: realized −$310 vs −$300 cap (3% of the $10,000 book) → entries rejected, no position",
       !s.events.some((e) => e.type === "open"));
   }
 
@@ -532,9 +577,9 @@ async function main(): Promise<void> {
     void postIdx;
     await until("live entry order", () => s.broker.createdOrders.length === 1);
     const created = s.broker.createdOrders[0]!;
-    check("live: entry is a limit-at-mid day order for the picked contract",
+    check("live: entry is a limit-at-mid day order for exactly 1 contract of the picked strike",
       created.symbol === AMD_CALL && created.type === "limit" &&
-      created.limitPrice === 2 && created.timeInForce === "day",
+      created.limitPrice === 2 && created.timeInForce === "day" && created.qty === 1,
       JSON.stringify(created));
     await until("entry fill tracked", () =>
       s.events.some((e) => e.type === "open" && e.symbol === AMD_CALL));
@@ -694,6 +739,64 @@ async function main(): Promise<void> {
     check("reprice: still unfilled after the reprice → cancelled, no third order",
       s.broker.createdOrders.length === 2 &&
       s.events.some((e) => e.reason.includes("entry abandoned")));
+  }
+
+  console.log("— S11: no price ceiling — a >$200 underlying is entered (shadow) —");
+  {
+    const NVDA_PICK = occ("NVDA", "261120", "C", 275);
+    const s = boot({ shadow: true, setup: (b) => {
+      // NVDA at $260 — dead under the old $200 ceiling. ATR ≈ 5.4%.
+      b.dailyBars.set("NVDA", weekdayDatesEnding("2026-11-03", 30).map((date, i) => {
+        const close = 258 + (i % 5);
+        return { date, open: close, high: close + 7, low: close - 7, close };
+      }));
+      b.latestPrices.set("NVDA", 260);
+      const bars: TimedBar[] = [];
+      for (let i = 0; i < 25; i++) {
+        const start = new Date(T0.getTime() - (25 - i) * 3_600_000);
+        bars.push(i < 24
+          ? { timestamp: start.toISOString(), open: 258, high: 262, low: 256, close: 258 }
+          : { timestamp: start.toISOString(), open: 262, high: 267, low: 261, close: 266 });
+      }
+      b.hourlyBars.set("NVDA", bars);
+      const c270 = occ("NVDA", "261120", "C", 270);
+      const c285 = occ("NVDA", "261120", "C", 285);
+      b.contracts.set("NVDA:call", [
+        contract(c270, "NVDA", "call", 270, "2026-11-20", 6000),
+        contract(NVDA_PICK, "NVDA", "call", 275, "2026-11-20", 5000),
+        contract(c285, "NVDA", "call", 285, "2026-11-20", 7000),
+      ]);
+      b.snapshots.set(c270, snapshot(c270, 5.4, 5.6, 0.42));
+      b.snapshots.set(NVDA_PICK, snapshot(NVDA_PICK, 4.4, 4.6, 0.36));
+      b.snapshots.set(c285, snapshot(c285, 2.9, 3.1, 0.28));
+    } });
+    await until("NVDA shadow entry", () =>
+      s.events.some((e) => e.type === "open" && e.symbol === NVDA_PICK));
+    check("ceiling: $260 underlying entered — 5% OTM target 273 → strike 275, 1 contract at mid $4.50 ($450 ≤ $600 cap)",
+      s.events.some((e) => e.type === "open" && e.symbol === NVDA_PICK && e.qty === 1 && e.price === 4.5));
+    check("ceiling: the decision text states the no-ceiling screen",
+      s.events.some((e) => e.reason.includes("no price ceiling")));
+  }
+
+  console.log("— S12: boot re-seed on the starting-capital doubling —");
+  {
+    // Pre-doubling state file: no startCapital fields, nothing touched.
+    const s = boot({ shadow: false, seedState: {
+      realizedTotal: 0, realizedByDay: {}, contracts: {},
+      pendingEntries: [], pendingExits: [],
+    } });
+    await sleep(200);
+    const st = readState(s.statePath) as { startCapital?: number; shadowStartCapital?: number };
+    check("re-seed: untouched pre-doubling books re-seed to $10,000 (live AND shadow)",
+      st.startCapital === 10000 && st.shadowStartCapital === 10000,
+      JSON.stringify({ startCapital: st.startCapital, shadowStartCapital: st.shadowStartCapital }));
+
+    // A book with a realized loss is a track record — no resize.
+    const s2 = boot({ shadow: false, seedState: { realizedTotal: -50, realizedByDay: {} } });
+    await sleep(200);
+    const st2 = readState(s2.statePath) as { startCapital?: number };
+    check("re-seed: a touched book (realized −$50) keeps its $5,000 start",
+      st2.startCapital === 5000, JSON.stringify({ startCapital: st2.startCapital }));
   }
 
   console.log(
