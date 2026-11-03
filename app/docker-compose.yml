@@ -1,3 +1,7 @@
+# Project name (Keith, 2026-11-03): containers/volumes/network are
+# prefixed "traders-" instead of the folder name ("app-").
+name: traders
+
 services:
   api:
     build:
