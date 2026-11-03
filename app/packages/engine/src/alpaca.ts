@@ -1,5 +1,5 @@
 import Alpaca from "@alpacahq/alpaca-trade-api";
-import type { DailyBar } from "./indicators.js";
+import type { DailyBar, TimedBar } from "./indicators.js";
 
 /**
  * Alpaca broker access.
@@ -41,6 +41,31 @@ export interface AlpacaClock {
   nextClose: string;
 }
 
+/** One listed option contract (Phase 3: Vega's chain surface). */
+export interface OptionContract {
+  /** OCC symbol, e.g. AMD261120C00150000. */
+  symbol: string;
+  underlying: string;
+  type: "call" | "put";
+  strike: number;
+  /** Expiration date (YYYY-MM-DD). */
+  expiry: string;
+  openInterest: number;
+}
+
+/** Latest quote + Greeks for one option contract (indicative feed). */
+export interface OptionSnapshot {
+  symbol: string;
+  bid: number;
+  ask: number;
+  /** (bid + ask) / 2 when a two-sided quote exists, else null. */
+  mid: number | null;
+  lastPrice: number | null;
+  /** Signed delta (negative for puts); null when the feed omits Greeks. */
+  delta: number | null;
+  iv: number | null;
+}
+
 export interface AlpacaClientLike {
   getAccount(): Promise<{ status: string; equity: number; cash: number }>;
   getClock(): Promise<AlpacaClock>;
@@ -51,8 +76,10 @@ export interface AlpacaClientLike {
     symbol: string;
     qty: number;
     side: "buy" | "sell";
-    type: "market";
+    type: "market" | "limit";
     timeInForce: "day" | "opg";
+    /** Required when type is "limit" (per-share for equities, per-contract for options). */
+    limitPrice?: number;
   }): Promise<AlpacaOrder>;
   cancelOrder(id: string): Promise<void>;
   /** Liquidate the entire position in `symbol` at market. */
@@ -60,6 +87,24 @@ export interface AlpacaClientLike {
   /** Daily bars from `startISO`, ascending by session date. */
   getDailyBars(symbol: string, startISO: string): Promise<DailyBar[]>;
   getLatestPrice(symbol: string): Promise<number>;
+  /** Hourly bars from `startISO`, ascending by bar start (Phase 3). */
+  getHourlyBars(symbol: string, startISO: string): Promise<TimedBar[]>;
+  /**
+   * Listed option contracts for one underlying + type inside an expiry
+   * window (Phase 3). Served from the Market Data API — the JS SDK has
+   * no contracts surface, so this uses raw REST with the same keys.
+   */
+  getOptionContracts(
+    underlying: string,
+    type: "call" | "put",
+    expiryGte: string,
+    expiryLte: string,
+  ): Promise<OptionContract[]>;
+  /**
+   * Snapshots (latest quote + Greeks + IV) for option contract symbols,
+   * on the free indicative feed (Phase 3).
+   */
+  getOptionSnapshots(symbols: string[]): Promise<Map<string, OptionSnapshot>>;
 }
 
 interface RawPosition {
@@ -177,6 +222,9 @@ export function createAlpacaClient(): AlpacaClientLike | null {
         side: order.side,
         type: order.type,
         time_in_force: order.timeInForce,
+        ...(order.limitPrice !== undefined
+          ? { limit_price: order.limitPrice }
+          : {}),
       } as never)) as RawOrder;
       return toOrder(raw);
     },
@@ -222,6 +270,143 @@ export function createAlpacaClient(): AlpacaClientLike | null {
         Price: number;
       };
       return Number(t.Price);
+    },
+
+    async getHourlyBars(symbol: string, startISO: string) {
+      const gen = client.getBarsV2(symbol as never, {
+        start: startISO,
+        timeframe: "1Hour",
+        limit: 1000,
+        adjustment: "all",
+      } as never) as AsyncGenerator<{
+        Timestamp: string;
+        OpenPrice: number;
+        HighPrice: number;
+        LowPrice: number;
+        ClosePrice: number;
+      }>;
+      const bars: TimedBar[] = [];
+      for await (const b of gen) {
+        bars.push({
+          timestamp: String(b.Timestamp),
+          open: b.OpenPrice,
+          high: b.HighPrice,
+          low: b.LowPrice,
+          close: b.ClosePrice,
+        });
+      }
+      bars.sort((a, b) =>
+        a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+      );
+      return bars;
+    },
+
+    async getOptionContracts(underlying, type, expiryGte, expiryLte) {
+      const contracts: OptionContract[] = [];
+      let pageToken: string | null = null;
+      // The chain inside a 2–4 week window can exceed one page for the
+      // most liquid names; follow next_page_token (bounded for safety).
+      for (let page = 0; page < 10; page++) {
+        const url = new URL(
+          "https://data.alpaca.markets/v1beta1/options/contracts",
+        );
+        url.searchParams.set("underlying_symbols", underlying);
+        url.searchParams.set("type", type);
+        url.searchParams.set("expiration_date_gte", expiryGte);
+        url.searchParams.set("expiration_date_lte", expiryLte);
+        url.searchParams.set("limit", "1000");
+        if (pageToken) url.searchParams.set("page_token", pageToken);
+        const res = await fetch(url, {
+          headers: {
+            "APCA-API-KEY-ID": keys.keyId,
+            "APCA-API-SECRET-KEY": keys.secretKey,
+          },
+        });
+        if (!res.ok) {
+          throw new Error(
+            `option contracts for ${underlying}: HTTP ${res.status}`,
+          );
+        }
+        const body = (await res.json()) as {
+          option_contracts?: {
+            symbol: string;
+            underlying_symbol: string;
+            type: string;
+            strike_price: string;
+            expiration_date: string;
+            open_interest?: string;
+          }[];
+          next_page_token?: string | null;
+        };
+        for (const c of body.option_contracts ?? []) {
+          contracts.push({
+            symbol: c.symbol,
+            underlying: c.underlying_symbol,
+            type: c.type === "put" ? "put" : "call",
+            strike: Number(c.strike_price),
+            expiry: c.expiration_date,
+            openInterest: Number(c.open_interest ?? 0),
+          });
+        }
+        pageToken = body.next_page_token ?? null;
+        if (!pageToken) break;
+      }
+      return contracts;
+    },
+
+    async getOptionSnapshots(symbols: string[]) {
+      const out = new Map<string, OptionSnapshot>();
+      // The snapshots endpoint accepts a bounded symbol list per call.
+      for (let i = 0; i < symbols.length; i += 100) {
+        const chunk = symbols.slice(i, i + 100);
+        if (chunk.length === 0) continue;
+        const url = new URL(
+          "https://data.alpaca.markets/v1beta1/options/snapshots",
+        );
+        url.searchParams.set("symbols", chunk.join(","));
+        // Free tier: the indicative feed. Real-time OPRA needs Alpaca's
+        // paid tier (Phase 3 scope §5 — the shadow soak measures lag).
+        url.searchParams.set("feed", "indicative");
+        const res = await fetch(url, {
+          headers: {
+            "APCA-API-KEY-ID": keys.keyId,
+            "APCA-API-SECRET-KEY": keys.secretKey,
+          },
+        });
+        if (!res.ok) {
+          throw new Error(`option snapshots: HTTP ${res.status}`);
+        }
+        const body = (await res.json()) as {
+          snapshots?: Record<
+            string,
+            {
+              latestQuote?: { bp?: number; ap?: number };
+              latestTrade?: { p?: number };
+              greeks?: { delta?: number };
+              impliedVolatility?: number;
+            }
+          >;
+        };
+        for (const [symbol, s] of Object.entries(body.snapshots ?? {})) {
+          const bid = Number(s.latestQuote?.bp ?? 0);
+          const ask = Number(s.latestQuote?.ap ?? 0);
+          out.set(symbol, {
+            symbol,
+            bid,
+            ask,
+            mid: ask > 0 && bid > 0 ? (bid + ask) / 2 : null,
+            lastPrice:
+              s.latestTrade?.p !== undefined ? Number(s.latestTrade.p) : null,
+            delta:
+              s.greeks?.delta !== undefined ? Number(s.greeks.delta) : null,
+            iv:
+              s.impliedVolatility !== undefined
+                ? Number(s.impliedVolatility)
+                : null,
+          });
+        }
+      }
+      return out;
     },
   };
 }

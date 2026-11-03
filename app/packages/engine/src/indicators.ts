@@ -60,3 +60,54 @@ export function priorHigh(bars: DailyBar[], period: number): number | null {
   }
   return max;
 }
+
+/** An intraday bar (Phase 3: Vega's hourly bars). */
+export interface TimedBar {
+  /** Bar start, ISO-8601 timestamp. */
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/** Highest high over the `period` bars BEFORE the last one (hourly breakout level). */
+export function priorHighTimed(bars: TimedBar[], period: number): number | null {
+  if (bars.length < period + 1) return null;
+  let max = -Infinity;
+  for (let i = bars.length - 1 - period; i < bars.length - 1; i++) {
+    if (bars[i]!.high > max) max = bars[i]!.high;
+  }
+  return max;
+}
+
+/** Lowest low over the `period` bars BEFORE the last one (hourly breakdown level). */
+export function priorLowTimed(bars: TimedBar[], period: number): number | null {
+  if (bars.length < period + 1) return null;
+  let min = Infinity;
+  for (let i = bars.length - 1 - period; i < bars.length - 1; i++) {
+    if (bars[i]!.low < min) min = bars[i]!.low;
+  }
+  return min;
+}
+
+/**
+ * Average true range over the last `period` daily bars (simple mean of
+ * true ranges — Vega's volatility screen needs a level, not a signal,
+ * so no Wilder smoothing). Null when fewer than period+1 bars exist.
+ */
+export function atrMean(bars: DailyBar[], period: number): number | null {
+  if (bars.length < period + 1 || period <= 0) return null;
+  let sum = 0;
+  for (let i = bars.length - period; i < bars.length; i++) {
+    const bar = bars[i]!;
+    const prevClose = bars[i - 1]!.close;
+    const tr = Math.max(
+      bar.high - bar.low,
+      Math.abs(bar.high - prevClose),
+      Math.abs(bar.low - prevClose),
+    );
+    sum += tr;
+  }
+  return sum / period;
+}

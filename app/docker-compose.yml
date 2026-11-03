@@ -35,6 +35,14 @@ services:
       # orders, realized PnL) persists on the shared data volume so a
       # restart reconciles instead of forgetting open positions.
       PAPER_STATE_PATH: /data/paper-trendia-state.json
+      # Phase 3 (Vega): SHADOW mode is the delivered default — her full
+      # options pipeline runs and logs decision/order-intent events but
+      # places NO broker orders. Set VEGA_SHADOW=false in .env to flip
+      # her to live paper orders (Keith's word only).
+      VEGA_SHADOW: ${VEGA_SHADOW:-true}
+      # Vega's state (tracked contracts, realized PnL, earnings map,
+      # IV history) persists on the same shared data volume.
+      VEGA_STATE_PATH: /data/paper-vega-state.json
     volumes:
       - ../bots:/bots:ro
       - fleet-data:/data

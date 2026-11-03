@@ -53,6 +53,7 @@ export function loadBotFile(filePath: string): BotConfig {
     ...identity,
     universe: data.universe,
     watchlist_examples: asStringArray(data.watchlist_examples),
+    candidate_pool: asStringArray(data.candidate_pool),
     timeframe: asString(data.timeframe),
     schedule: asString(data.schedule),
     rules: isRecord(data.rules) ? data.rules : {},

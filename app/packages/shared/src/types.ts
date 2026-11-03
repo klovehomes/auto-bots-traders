@@ -33,6 +33,8 @@ export interface BotConfig {
   // Per-strategy plugins interpret them in later phases.
   universe?: unknown;
   watchlist_examples?: string[];
+  /** Phase 3 (Vega): the screened candidate pool from the bot file. */
+  candidate_pool?: string[];
   timeframe?: string;
   schedule?: string;
   rules: Record<string, unknown>;

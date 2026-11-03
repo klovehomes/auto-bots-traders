@@ -589,14 +589,16 @@ export function startPaperTrader(
 }
 
 /**
- * Split the engine's single control channel between the paper trader and
- * the simulator: each consumer sees only its own bots' liquidation
- * requests. (The underlying client's drain marks requests consumed, so
- * exactly one router may drain it.)
+ * Split the engine's single control channel between the real paper
+ * runners and the simulator: each consumer sees only its own bots'
+ * liquidation requests. (The underlying client's drain marks requests
+ * consumed, so exactly one router may drain it.)
  */
 export function createControlRouter(control: ControlClient): {
   forBot: (codename: string) => PaperControl;
-  forOthers: (excluded: string) => PaperControl;
+  /** Control view for a set of codenames (Phase 3 runner registry). */
+  forBots: (codenames: readonly string[]) => PaperControl;
+  forOthers: (excluded: string | readonly string[]) => PaperControl;
 } {
   let queue: PendingLiquidation[] = [];
   const pump = (): void => {
@@ -608,16 +610,17 @@ export function createControlRouter(control: ControlClient): {
     queue = queue.filter((p) => !pred(p));
     return mine;
   };
+  const view = (pred: (p: PendingLiquidation) => boolean): PaperControl => ({
+    isHalted: control.isHalted,
+    drainLiquidations: () => take(pred),
+    reportLiquidation: control.reportLiquidation,
+  });
   return {
-    forBot: (codename) => ({
-      isHalted: control.isHalted,
-      drainLiquidations: () => take((p) => p.codename === codename),
-      reportLiquidation: control.reportLiquidation,
-    }),
-    forOthers: (excluded) => ({
-      isHalted: control.isHalted,
-      drainLiquidations: () => take((p) => p.codename !== excluded),
-      reportLiquidation: control.reportLiquidation,
-    }),
+    forBot: (codename) => view((p) => p.codename === codename),
+    forBots: (codenames) => view((p) => codenames.includes(p.codename)),
+    forOthers: (excluded) => {
+      const set = typeof excluded === "string" ? [excluded] : excluded;
+      return view((p) => !set.includes(p.codename));
+    },
   };
 }
