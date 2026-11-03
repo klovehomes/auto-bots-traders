@@ -323,6 +323,27 @@ body {
   font-size: 13px;
 }
 
+.feed-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.feed-search {
+  background: #0d1424;
+  color: #e6edf3;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 13px;
+  min-width: 170px;
+}
+
+.feed-search::placeholder {
+  color: #5f7189;
+}
+
 .feed-list {
   list-style: none;
   margin: 0;

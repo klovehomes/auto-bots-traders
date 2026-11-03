@@ -108,6 +108,7 @@ export function App() {
   const [feedOpen, setFeedOpen] = useState(params.get("feed") === "open");
   const [feedTab, setFeedTab] = useState<FeedTab>("trades");
   const [botFilter, setBotFilter] = useState<string>("all");
+  const [textFilter, setTextFilter] = useState<string>("");
   const [selected, setSelected] = useState<FleetEvent | null>(null);
   const [highlightDecision, setHighlightDecision] = useState<string | null>(null);
   const [webglFailed, setWebglFailed] = useState(false);
@@ -369,7 +370,18 @@ export function App() {
 
   const filteredEvents =
     botFilter === "all" ? events : events.filter((e) => e.bot === botFilter);
-  const tradeEvents = filteredEvents.filter(
+  // Free-text filter (Keith, 2026-11-03): type-as-you-go match against
+  // bot, symbol (incl. Vega's OCC contract symbols), type and reason
+  // text — e.g. typing QQQ narrows the stream to QQQ rows only.
+  const textQuery = textFilter.trim().toLowerCase();
+  const matchesText = (e: FleetEvent): boolean =>
+    textQuery === "" ||
+    [e.bot, e.symbol ?? "", e.type, e.reason ?? ""]
+      .join(" ")
+      .toLowerCase()
+      .includes(textQuery);
+  const textFilteredEvents = filteredEvents.filter(matchesText);
+  const tradeEvents = textFilteredEvents.filter(
     (e) => e.type === "open" || e.type === "close",
   );
   const latest = events[0];
@@ -378,12 +390,17 @@ export function App() {
   // trade list by timestamp. They live in their own state array and are
   // merged only at render time — they never enter the PnL math in
   // fleetState (computeStats/computeTotals see trade events only).
-  const visibleControl = controlLog.filter(
-    (e) =>
-      botFilter === "all" ||
-      e.scope === "fleet" ||
-      nameForCodename(e.target ?? "") === botFilter,
-  );
+  // While a text query is active the control (kill-switch) rows step
+  // aside — the user is hunting trades, not system rows.
+  const visibleControl =
+    textQuery === ""
+      ? controlLog.filter(
+          (e) =>
+            botFilter === "all" ||
+            e.scope === "fleet" ||
+            nameForCodename(e.target ?? "") === botFilter,
+        )
+      : [];
   type FeedRow =
     | { kind: "trade"; ts: string; event: FleetEvent }
     | { kind: "control"; ts: string; entry: AuditEntry };
@@ -607,26 +624,40 @@ export function App() {
                   Decisions
                 </button>
               </div>
-              <label className="feed-filter">
-                Bot{" "}
-                <select
-                  value={botFilter}
-                  onChange={(e) => setBotFilter(e.target.value)}
-                >
-                  <option value="all">All bots</option>
-                  {bots.map((b) => (
-                    <option key={b.codename} value={b.name}>
-                      {b.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div className="feed-filter-group">
+                <input
+                  className="feed-search"
+                  type="text"
+                  placeholder="Filter… e.g. QQQ"
+                  value={textFilter}
+                  onChange={(e) => setTextFilter(e.target.value)}
+                  aria-label="Filter the stream by text"
+                />
+                <label className="feed-filter">
+                  Bot{" "}
+                  <select
+                    value={botFilter}
+                    onChange={(e) => setBotFilter(e.target.value)}
+                  >
+                    <option value="all">All bots</option>
+                    {bots.map((b) => (
+                      <option key={b.codename} value={b.name}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             </div>
 
             {feedTab === "trades" ? (
               <>
                 {feedRows.length === 0 && (
-                  <p className="empty">No trades yet — the stream is live.</p>
+                  <p className="empty">
+                    {textQuery
+                      ? `No trades match “${textFilter.trim()}”.`
+                      : "No trades yet — the stream is live."}
+                  </p>
                 )}
                 <ul className="feed-list">
                   {feedRows.map((row, i) => {
@@ -702,11 +733,15 @@ export function App() {
               </>
             ) : (
               <>
-                {filteredEvents.length === 0 && (
-                  <p className="empty">No decisions recorded yet.</p>
+                {textFilteredEvents.length === 0 && (
+                  <p className="empty">
+                    {textQuery
+                      ? `No decisions match “${textFilter.trim()}”.`
+                      : "No decisions recorded yet."}
+                  </p>
                 )}
                 <ul className="feed-list">
-                  {filteredEvents.map((event, i) => {
+                  {textFilteredEvents.map((event, i) => {
                     const executed = event.type === "open" || event.type === "close";
                     return (
                       <li
