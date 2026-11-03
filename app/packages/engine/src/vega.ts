@@ -32,9 +32,9 @@ import {
  * Scope: PHASE3-VEGA-SCOPE.md (decisions §6, all made by Keith
  * 2026-11-03). Vega's `.md` rules, translated literally:
  *
- * - Hourly during market hours she screens a 30-symbol candidate pool:
+ * - Hourly during market hours he screens a 30-symbol candidate pool:
  *   price $5–$200, 20-day ATR ≥ 3.5% of price (the IV-percentile leg of
- *   her OR-screen activates once ~60 days of self-recorded IV history
+ *   his OR-screen activates once ~60 days of self-recorded IV history
  *   exist — daily IV is recorded in state from day one).
  * - Signal (D2): an hourly close beyond the prior 20-hour high (long
  *   calls) or low (long puts).
@@ -43,9 +43,9 @@ import {
  *   the calendar is unavailable, entries pause and the pause is logged
  *   as a decision — never a silent pass.
  * - Contract pick: expiry 2–4 weeks out, |delta| closest to 0.45 inside
- *   her 0.35–0.55 band, open interest ≥ 1,000, bid/ask spread ≤ 10% of
+ *   his 0.35–0.55 band, open interest ≥ 1,000, bid/ask spread ≤ 10% of
  *   mid. A failed pick is a logged no-trade decision, before the Gate.
- * - Risk Gate: premium ≤ 6% of her virtual $5,000 book per position,
+ * - Risk Gate: premium ≤ 6% of his virtual $5,000 book per position,
  *   max 6 positions, 3% daily loss cap. Contracts = floor(cap ÷
  *   (ask × 100)); one contract over the cap is a gate rejection.
  * - Orders (D5): limit at mid, one reprice after 60 s at the fresh mid,
@@ -59,12 +59,12 @@ import {
  *   book for exits, but places NO broker orders. VEGA_SHADOW=false is
  *   the only step to live paper orders. Shadow and live books and
  *   realized PnL are kept strictly separate in state.
- * - Kill switch: halts cancel her open option orders; kill+liquidate
- *   closes her tracked contracts and reports honestly. In shadow mode
+ * - Kill switch: halts cancel his open option orders; kill+liquidate
+ *   closes his tracked contracts and reports honestly. In shadow mode
  *   liquidation settles the shadow book at current mids.
  *
  * Milestone 3 (shares ballast / 75-25 mix) is intentionally NOT here
- * (D3): she runs options-only until the mix lands.
+ * (D3): he runs options-only until the mix lands.
  */
 
 const ALLOCATION = 5000;
@@ -563,7 +563,7 @@ export function startVegaTrader(
     }
   }
 
-  /** Cancel Vega's open broker orders (hers = her OCC symbols / tracked ids). */
+  /** Cancel Vega's open broker orders (his own OCC symbols / tracked ids). */
   async function cancelOpenOrders(): Promise<void> {
     if (shadow) return;
     const trackedIds = new Set([
@@ -959,7 +959,7 @@ export function startVegaTrader(
         `price inside the ${money(params.priceMin)}–${money(params.priceMax)} band`;
 
       // One options position per underlying at a time (diversification
-      // across the pool; her file caps positions, not per-name stacks).
+      // across the pool; his file caps positions, not per-name stacks).
       const heldHere =
         Object.values(book()).some((p) => p.underlying === symbol) ||
         state.pendingEntries.some((p) => p.underlying === symbol);
@@ -1177,7 +1177,7 @@ export function startVegaTrader(
     );
   }
 
-  /** Kill + liquidate: cancel her orders, close her contracts, report. */
+  /** Kill + liquidate: cancel his orders, close his contracts, report. */
   async function handleLiquidations(): Promise<void> {
     for (const req of control.drainLiquidations()) {
       if (req.codename !== bot.codename) continue;
@@ -1267,7 +1267,7 @@ export function startVegaTrader(
     }
   }
 
-  /** Adopt her broker contract positions at boot (live mode only). */
+  /** Adopt his broker contract positions at boot (live mode only). */
   async function reconcile(): Promise<void> {
     const positions = await client.getPositions();
     for (const pos of positions) {

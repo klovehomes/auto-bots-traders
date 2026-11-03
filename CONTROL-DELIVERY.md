@@ -223,7 +223,7 @@ mobile. Typecheck passes for all four packages; `vite build` passes.
    `pendingLiquidate` cleared, and the audit log contained the
    Snapback kill, Snapback resume, and Vega kill-liquidate entries.
 4. **Team kill / resume:** `POST /control/fleet/kill` halted the
-   remaining 4 bots (Vega already halted — no-op for her, correctly
+   remaining 4 bots (Vega already halted — no-op for him, correctly
    not double-logged); **0 trade events team-wide in 15 s**; team
    resume changed all 5 and activity returned (15 events in 16 s).
 5. **Screenshots** (`ui-preview/`): `kill-controls-desktop.png`

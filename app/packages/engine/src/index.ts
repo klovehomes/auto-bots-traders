@@ -19,7 +19,7 @@ const FIRST_EVENT_DELAY_MS = 1000;
 /**
  * Runner registry — bots with a real strategy plugin on the paper
  * account: Trendia (Phase 1, daily bars) and Vega (Phase 3, options;
- * she starts in shadow mode per the Phase 3 scope, see vega.ts).
+ * he starts in shadow mode per the Phase 3 scope, see vega.ts).
  * Every other bot stays on the simulator until its own phase lands.
  */
 const TRENDIA_CODENAME = "trendia";
@@ -124,7 +124,7 @@ async function main(): Promise<void> {
     (process.env.VEGA_SHADOW ?? "true").trim().toLowerCase() !== "false";
   console.log(
     "[engine] MODE=paper — Trendia trades the Alpaca paper account on real market data; " +
-      `Vega runs her Phase 3 options pipeline (${vegaShadow ? "SHADOW mode — no orders" : "live paper orders"}); ` +
+      `Vega runs his Phase 3 options pipeline (${vegaShadow ? "SHADOW mode — no orders" : "live paper orders"}); ` +
       "Snapback, Wesley and PolyCrypt9000 stay on the simulator",
   );
   await checkAlpacaPaperConnection();

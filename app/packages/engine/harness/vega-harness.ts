@@ -10,7 +10,7 @@
  *   4. take-profit / stop-loss / time-stop / expiry-guardrail exits
  *   5. earnings guard blocks a name 2 days out; calendar-down fails closed
  *   6. Risk Gate rejections (premium cap, daily loss cap)
- *   7. halt cancels her open orders
+ *   7. halt cancels his open orders
  *   8. kill + liquidate closes contracts and reports
  *   9. restart reconcile adopts an open contract position
  *  10. limit-at-mid entry with the 60 s reprice-then-cancel rule (D5)
@@ -560,7 +560,7 @@ async function main(): Promise<void> {
       st.realizedTotal === -80 && (st.shadowRealizedTotal ?? 0) === 0);
   }
 
-  console.log("— S6: halt cancels her open orders —");
+  console.log("— S6: halt cancels his open orders —");
   {
     const s = boot({ shadow: false, setup: (b) => {
       b.hourlyBars.set("AMD", amdHourlyBars(T0));

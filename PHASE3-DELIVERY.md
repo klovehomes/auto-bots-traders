@@ -15,20 +15,20 @@ mode**. Milestone 3 (shares ballast / 75-25 mix) is NOT in this build
   Snapback, Wesley and PolyCrypt9000. The control router
   (`paper.ts`) was generalized to a three-way liquidation split.
 - **Vega runner** (`engine/src/vega.ts`, new): hourly screen of the
-  30-symbol `candidate_pool` (added to `bots/vega.md`: her original 13
+  30-symbol `candidate_pool` (added to `bots/vega.md`: his original 13
   + NVDA, MSTR, ARM, UPST, NIO, SNAP, DKNG, RBLX, UBER, XYZ, SHOP, NET,
   RIOT, GME, ARKK, XBI, SQQQ) — price $5–$200, ATR(20) ≥ 3.5% of price;
   20-hour breakout/breakdown signals (D2); contract pick at expiry
-  2–4 weeks, |delta| closest to 0.45 in her 0.35–0.55 band, OI ≥ 1,000,
+  2–4 weeks, |delta| closest to 0.45 in his 0.35–0.55 band, OI ≥ 1,000,
   spread ≤ 10% of mid (failed picks are logged no-trade decisions);
-  Risk Gate at her .md numbers (premium ≤ 6% of her $5,000 virtual
+  Risk Gate at his .md numbers (premium ≤ 6% of his $5,000 virtual
   book = $300/position, max 6 positions, 3% daily loss cap; sizing =
   floor(cap ÷ ask×100), one contract over the cap is a rejection);
   exits on the 30 s tick off live mids (+50% TP, −35% stop, 5-trading-
   day time stop, force-exit 2 trading days before expiry); full
   decision records (contract, strike, expiry, delta, IV, premium, gate
   verdict, params snapshot); kill switch via the existing control
-  router (halt cancels her open orders; kill+liquidate closes her
+  router (halt cancels his open orders; kill+liquidate closes his
   contracts and reports); state at `/data/paper-vega-state.json` with
   boot reconcile of broker contract positions; daily IV recorded per
   underlying in state for the future IV-percentile screen leg.
@@ -58,7 +58,7 @@ mode**. Milestone 3 (shares ballast / 75-25 mix) is NOT in this build
 `app/.env.example`). In shadow, Vega runs the full pipeline and emits
 decision / order-intent events labelled `SHADOW ·`, tracking a shadow
 book so exits are simulated against live mids — but places **no**
-broker orders. To flip her to live paper orders after the soak:
+broker orders. To flip him to live paper orders after the soak:
 
 1. In the app folder's `.env`, set `VEGA_SHADOW=false`.
 2. `docker compose up -d` (not `restart` — env changes need recreate).
@@ -111,7 +111,7 @@ broker orders. To flip her to live paper orders after the soak:
 
 ## Interpretations worth knowing (scope was silent; choices logged)
 
-- One open options position per underlying at a time (her file caps
+- One open options position per underlying at a time (his file caps
   total positions, not per-name stacks) — a second signal on a held
   name is a gate rejection with that reason.
 - Adopted (reconciled) positions count the time stop from the
@@ -120,7 +120,7 @@ broker orders. To flip her to live paper orders after the soak:
 - Trading-day counting ignores exchange holidays (weekdays only).
 - The exactly-10% spread boundary is inclusive ("within 10% of mid").
 - Vega's tick never overlaps itself (an `evaluating` guard Trendia
-  doesn't need): her hourly screen is heavier than one 30 s tick in
+  doesn't need): his hourly screen is heavier than one 30 s tick in
   the worst case, and overlapping evaluations could double-submit.
 
 ## Mac steps (Keith)
@@ -128,6 +128,6 @@ broker orders. To flip her to live paper orders after the soak:
 Same flow as v10: fetch the v11 bundle (or pull `dev`), keep your
 existing app-folder `.env` (keys + MODE=paper already in place),
 `docker compose up --build -d` from the app folder. Vega comes up in
-SHADOW mode by default — watch her `SHADOW ·` decisions in the stream
+SHADOW mode by default — watch his `SHADOW ·` decisions in the stream
 for 2–3 trading days, then flip `VEGA_SHADOW=false` + `docker compose
-up -d` when you're satisfied with her picks.
+up -d` when you're satisfied with his picks.
