@@ -7,7 +7,7 @@ market: us_options
 broker: alpaca
 strategy: options_income_wheel
 universe: screened weekly by the rules below — no fixed list
-watchlist_examples: [F, INTC, BAC, PFE, T, VZ, SOFI, RIVN, NU, WBD]
+watchlist_examples: [F, INTC, BAC, PFE, T, VZ, SOFI, RIVN, NU, WBD,DRAM,CAVA,CART]
 timeframe: 1Day
 schedule: evaluate daily; premium cycles run weekly and monthly, weekdays during market hours
 rules:
