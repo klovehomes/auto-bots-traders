@@ -1,12 +1,12 @@
 import {
   loadBots,
-  parseFleetMode,
   resolveBotsDir,
   type BotConfig,
   type FleetEvent,
 } from "@fleet/shared";
 import { checkAlpacaPaperConnection, createAlpacaClient } from "./alpaca.js";
 import { createControlClient } from "./control.js";
+import { createModeSupervisor, resolveBootMode } from "./mode.js";
 import { createControlRouter, startPaperTrader } from "./paper.js";
 import { startSimulator } from "./sim.js";
 import { startSnapbackTrader } from "./snapback.js";
@@ -14,6 +14,12 @@ import { startVegaTrader } from "./vega.js";
 
 const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:8080";
 const INTERNAL_EVENT_TOKEN = process.env.INTERNAL_EVENT_TOKEN ?? "dev-token";
+/**
+ * The dashboard mode switch's stored choice (Phase 5), written by the
+ * API on the shared data volume. Read at boot: stored beats MODE env.
+ */
+const MODE_STATE_PATH =
+  process.env.MODE_STATE_PATH ?? "data/mode-state.json";
 const EVENT_INTERVAL_MS = 5000;
 const FIRST_EVENT_DELAY_MS = 1000;
 
@@ -67,18 +73,37 @@ async function main(): Promise<void> {
     );
   }
 
-  // Fleet run mode (MODE env): sim | paper | connected. The fleet MODE
-  // is the ceiling — a bot's own mode can sit below it, never above it.
-  const rawMode = process.env.MODE;
-  const mode = parseFleetMode(rawMode);
-  if (rawMode && rawMode.trim().toLowerCase() !== mode) {
-    console.warn(
-      `[engine] unrecognized MODE="${rawMode}" — falling back to "sim"`,
-    );
+  // Fleet run mode: sim | paper | connected. Resolution order
+  // (Phase 5): the mode stored by the dashboard switch on the shared
+  // data volume → the MODE env → "sim". The env is only the initial
+  // default; once Keith flips the dashboard switch, the stored choice
+  // wins on every later boot. The fleet MODE is the ceiling — a bot's
+  // own mode can sit below it, never above it.
+  const bootMode = resolveBootMode({
+    storedPath: MODE_STATE_PATH,
+    envRaw: process.env.MODE,
+  });
+  if (bootMode.warning) {
+    console.warn(`[engine] ⚠ ${bootMode.warning}`);
   }
+  const mode = bootMode.mode;
+  console.log(`[engine] MODE=${mode} (source: ${bootMode.source})`);
 
   const rotation = bots.filter((b) => b.enabled);
   const active = rotation.length > 0 ? rotation : bots;
+
+  // Mode supervisor (Phase 5): watches the control poll for the
+  // dashboard switch's desired mode and restarts this process into a
+  // changed mode (Docker's restart policy does the relaunch); also
+  // reports the running mode back to the API for the dashboard.
+  const modeSupervisor = createModeSupervisor({
+    runningMode: mode,
+    bootSource: bootMode.source,
+    apiBaseUrl: API_BASE_URL,
+    token: INTERNAL_EVENT_TOKEN,
+    postEvent,
+    exit: (code) => process.exit(code),
+  });
 
   // Risk Gate control channel: poll the API-owned kill-switch state in
   // every mode. The simulator enforces halts against its own book; the
@@ -94,8 +119,11 @@ async function main(): Promise<void> {
             : ""),
       );
     },
+    onControlState: (state) =>
+      modeSupervisor.observeDesiredMode(state.desiredMode),
   });
   control.start();
+  modeSupervisor.startReporting();
 
   if (mode === "sim") {
     // Local fake-data mode: no broker, no keys, no real market data.

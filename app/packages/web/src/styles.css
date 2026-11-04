@@ -42,9 +42,89 @@ body {
 
 .header-badges {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.header-badges-row {
+  display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  justify-content: flex-end;
+}
+
+/* ---------- Mode switch (Phase 5, under the status badges) ---------- */
+.mode-switch {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.mode-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-switch-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8b98a9;
+}
+
+.mode-select {
+  background: rgba(13, 20, 36, 0.85);
+  color: #e6edf3;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.mode-select:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.mode-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: #f0b429;
+}
+
+.mode-confirm {
+  max-width: 350px;
+  background: #0d1424;
+  border: 1px solid #f0b429;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.mode-confirm-text {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: #c9d4e0;
+}
+
+.mode-confirm .confirm-actions {
+  margin-top: 12px;
+}
+
+.btn.mode-switch-btn {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #ffffff;
+}
+
+.btn.mode-switch-btn:hover:not(:disabled) {
+  background: #2b7fff;
 }
 
 .ws-status {

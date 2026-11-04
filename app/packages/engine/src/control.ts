@@ -13,7 +13,12 @@
  *   them here, executes the forced closes against its own position
  *   book, and posts the report back (closed positions + any that could
  *   not be closed, with reasons — never silently dropped).
+ * - Fleet mode (Phase 5): the same poll carries the dashboard switch's
+ *   desired mode; `onControlState` hands it to the mode supervisor
+ *   (see mode.ts), which restarts the engine into a changed mode.
  */
+
+import type { FleetMode } from "@fleet/shared";
 
 export interface PendingLiquidation {
   id: string;
@@ -56,6 +61,13 @@ interface ControlClientOptions {
   token: string;
   /** Called whenever a bot's halted flag flips (logging / surfaces). */
   onHaltChange?: (codename: string, halted: boolean) => void;
+  /**
+   * Called after every successful poll with the raw internal state.
+   * Phase 5: carries the fleet's desired mode (dashboard switch) so
+   * the engine can notice a mode change and restart into it. Absent
+   * when the API predates Phase 5 — callers must tolerate undefined.
+   */
+  onControlState?: (state: { desiredMode?: FleetMode }) => void;
 }
 
 export function createControlClient(opts: ControlClientOptions): ControlClient {
@@ -74,7 +86,9 @@ export function createControlClient(opts: ControlClientOptions): ControlClient {
       const state = (await res.json()) as {
         bots: Record<string, { halted: boolean }>;
         pending: PendingLiquidation[];
+        desiredMode?: FleetMode;
       };
+      opts.onControlState?.(state);
       for (const [codename, b] of Object.entries(state.bots)) {
         const prev = halted.get(codename) ?? false;
         if (prev !== b.halted) {

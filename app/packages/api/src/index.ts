@@ -4,6 +4,7 @@ import websocket from "@fastify/websocket";
 import { WebSocket } from "ws";
 import {
   fleetEventSchema,
+  fleetModeSchema,
   loadBots,
   parseFleetMode,
   resolveBotsDir,
@@ -15,6 +16,7 @@ import {
   type LiquidationClose,
   type LiquidationFailure,
 } from "./control.js";
+import { ModeStore } from "./mode.js";
 
 const PORT = Number(process.env.API_PORT ?? 8080);
 const INTERNAL_EVENT_TOKEN = process.env.INTERNAL_EVENT_TOKEN ?? "dev-token";
@@ -27,6 +29,14 @@ const MODE = parseFleetMode(process.env.MODE);
  */
 const CONTROL_STATE_PATH =
   process.env.CONTROL_STATE_PATH ?? "./data/control-state.json";
+/**
+ * Where the dashboard mode switch's desired mode persists (Phase 5).
+ * Same durability requirement as the control state — in Docker it
+ * lives on the shared fleet-data volume next to it, and the engine
+ * reads the same file at boot (stored mode beats the MODE env).
+ */
+const MODE_STATE_PATH =
+  process.env.MODE_STATE_PATH ?? "./data/mode-state.json";
 /** How long a kill-liquidate POST waits for the engine's report before
  *  answering with a still-pending report (the report completes over the
  *  WebSocket when it lands). The sim engine polls every 1 s. */
@@ -52,6 +62,14 @@ async function main(): Promise<void> {
   );
   app.log.info(`control state: ${CONTROL_STATE_PATH}`);
 
+  // Dashboard mode switch (Phase 5): the API owns the fleet's desired
+  // mode (persisted), serves it to the engine on the internal control
+  // poll, and tracks the engine's running-mode reports for the UI.
+  const modeStore = new ModeStore(MODE_STATE_PATH, MODE);
+  app.log.info(
+    `mode state: ${MODE_STATE_PATH} (desired: ${modeStore.desiredMode()})`,
+  );
+
   /** Live WebSocket clients subscribed to /events. */
   const clients = new Set<WebSocket>();
 
@@ -72,6 +90,16 @@ async function main(): Promise<void> {
     });
   }
 
+  /** Fan a mode-state change (switch requested / engine reported) out
+   *  to every open dashboard. */
+  function broadcastMode(): void {
+    broadcast({
+      kind: "mode",
+      ts: new Date().toISOString(),
+      state: modeStore.publicState(),
+    });
+  }
+
   app.get("/health", async () => ({ ok: true, mode: MODE }));
 
   app.get("/bots", async () => bots);
@@ -83,6 +111,27 @@ async function main(): Promise<void> {
   // deliberately NOT exposed publicly.
 
   app.get("/control", async () => control.publicState());
+
+  // --- Dashboard mode switch (Phase 5) -------------------------------
+  // Same trust boundary as the kill switch above: private network
+  // only, never exposed publicly. Validation lives in ModeStore:
+  // unknown modes are rejected, and "connected" (live cash account)
+  // is refused outright — the switch can never reach real money.
+  app.get("/mode", async () => modeStore.publicState());
+
+  app.post("/mode", async (request, reply) => {
+    const body = request.body as { mode?: unknown } | null;
+    const result = modeStore.requestMode(body?.mode, "web-ui");
+    if (!result.ok) {
+      return reply.code(result.status).send({ error: result.error });
+    }
+    if (result.changed) broadcastMode();
+    return {
+      ok: true,
+      changed: result.changed,
+      state: modeStore.publicState(),
+    };
+  });
 
   async function runAction(apply: () => AuditEntry | null) {
     const entry = apply();
@@ -155,11 +204,36 @@ async function main(): Promise<void> {
   );
 
   // Engine-facing control channel (internal token, same as events).
+  // Phase 5: the payload also carries the fleet's desired mode, which
+  // is how a running engine learns the dashboard switch was flipped.
   app.get("/internal/control", async (request, reply) => {
     if (request.headers["x-internal-token"] !== INTERNAL_EVENT_TOKEN) {
       return reply.code(401).send({ error: "invalid internal token" });
     }
-    return control.internalState();
+    return { ...control.internalState(), desiredMode: modeStore.desiredMode() };
+  });
+
+  // The engine reports the mode it is actually running (at boot and
+  // on a heartbeat) so dashboards can show switch progress. Mirrors
+  // the liquidation-report handshake below.
+  app.post("/internal/control/mode-report", async (request, reply) => {
+    if (request.headers["x-internal-token"] !== INTERNAL_EVENT_TOKEN) {
+      return reply.code(401).send({ error: "invalid internal token" });
+    }
+    const body = request.body as {
+      mode?: unknown;
+      source?: unknown;
+    } | null;
+    const parsed = fleetModeSchema.safeParse(body?.mode);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "missing or invalid mode" });
+    }
+    modeStore.reportRunning(
+      parsed.data,
+      typeof body?.source === "string" ? body.source : "engine",
+    );
+    broadcastMode();
+    return { ok: true };
   });
 
   app.post("/internal/control/liquidation-report", async (request, reply) => {

@@ -63,6 +63,30 @@ interface ControlMessage {
   entry: AuditEntry | null;
 }
 
+// --- Dashboard mode switch (Phase 5, owned by the API — GET /mode) ----
+export interface ModeState {
+  /** The mode the fleet should be running (stored switch choice, else env). */
+  desired: FleetMode;
+  desiredSource: "dashboard" | "env";
+  /** The mode the engine last reported actually running; null until it reports. */
+  running: { mode: FleetMode; source: string; reportedAt: string } | null;
+  /** True while a switch (engine restart) is in flight. */
+  switching: boolean;
+  switchable: FleetMode[];
+}
+
+interface ModeMessage {
+  kind: "mode";
+  ts: string;
+  state: ModeState;
+}
+
+const MODE_LABELS: Record<FleetMode, string> = {
+  sim: "Simulator",
+  paper: "Paper trading",
+  connected: "Live cash account",
+};
+
 /** Human one-liner for a control action, used by the trade-stream
  *  system rows and the feed-bar preview. */
 export function describeControl(
@@ -99,7 +123,13 @@ const params = new URLSearchParams(window.location.search);
 export function App() {
   const [bots, setBots] = useState<BotConfig[]>([]);
   const [botsError, setBotsError] = useState<string | null>(null);
-  const [mode, setMode] = useState<FleetMode | null>(null);
+  // Mode switch (Phase 5): the API-owned mode state (desired + the
+  // engine's reported running mode). The header badge shows the
+  // running mode when known, else the desired one.
+  const [modeState, setModeState] = useState<ModeState | null>(null);
+  // A mode the user picked in the dropdown but hasn't confirmed yet.
+  const [modeChoice, setModeChoice] = useState<FleetMode | null>(null);
+  const [modeBusy, setModeBusy] = useState(false);
   const [status, setStatus] = useState<WsStatus>("connecting");
   const [events, setEvents] = useState<FleetEvent[]>([]);
   const [tab, setTab] = useState<MainTab>(
@@ -273,19 +303,60 @@ export function App() {
         : `/control/bots/${c.codename}/kill-liquidate`,
     );
   }
+
+  // --- Mode switch (Phase 5) ------------------------------------------
+  // Picking a different mode in the header dropdown only stages it
+  // (modeChoice); the inline Switch button fires POST /mode. The API
+  // stores the choice, the running engine notices on its control poll
+  // and restarts into it — modeState.switching stays true (and this
+  // control disabled) until the engine reports the new running mode.
+  async function postModeSwitch(target: FleetMode): Promise<void> {
+    setModeBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/mode`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: target }),
+      });
+      const data = (await res.json()) as {
+        state?: ModeState;
+        error?: string;
+      };
+      if (data.state) setModeState(data.state);
+    } catch {
+      // The WS broadcast / next /mode fetch reconciles state; a failed
+      // POST simply leaves the previous state on screen.
+    } finally {
+      setModeBusy(false);
+      setModeChoice(null);
+    }
+  }
+  function confirmModeSwitch(): void {
+    if (!modeChoice || modeBusy) return;
+    void postModeSwitch(modeChoice);
+  }
   useEffect(() => {
     statsRef.current = stats;
   }, [stats]);
 
+  // Mode state (Phase 5): fetched once from GET /mode, then kept live
+  // by the WebSocket "mode" broadcasts (switch requested / engine
+  // reported). The header badge derives from this, not from /health —
+  // after a dashboard switch the API's own env no longer describes
+  // what the engine is running.
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/health`)
-      .then((res) => res.json() as Promise<{ ok: boolean; mode?: FleetMode }>)
+    fetch(`${API_BASE}/mode`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<ModeState>;
+      })
       .then((data) => {
-        if (!cancelled) setMode(data.mode ?? null);
+        if (!cancelled) setModeState(data);
       })
       .catch(() => {
-        // Health badge is best-effort; the bots fetch below reports errors.
+        // Mode badge/switch are best-effort on load; the WS broadcast
+        // delivers state live as soon as anything changes.
       });
     return () => {
       cancelled = true;
@@ -343,11 +414,16 @@ export function App() {
       try {
         const parsed = JSON.parse(String(message.data)) as
           | FleetEvent
-          | ControlMessage;
+          | ControlMessage
+          | ModeMessage;
         if ((parsed as ControlMessage).kind === "control") {
           const msg = parsed as ControlMessage;
           setControl(msg.state);
           if (msg.entry) mergeAuditEntry(msg.entry);
+          return;
+        }
+        if ((parsed as ModeMessage).kind === "mode") {
+          setModeState((parsed as ModeMessage).state);
           return;
         }
         const event = parsed as FleetEvent;
@@ -422,6 +498,21 @@ export function App() {
     setHighlightDecision(event.decision_id);
   }
 
+  // Mode switch derivations (Phase 5): the badge shows what the engine
+  // is actually running when it has reported, else the desired mode.
+  const mode: FleetMode | null =
+    modeState?.running?.mode ?? modeState?.desired ?? null;
+  const desiredMode: FleetMode | null = modeState?.desired ?? null;
+  const modeSwitching = modeState?.switching ?? false;
+  /** A staged dropdown pick that still needs its inline confirmation. */
+  const pendingMode: FleetMode | null =
+    modeChoice !== null && modeChoice !== desiredMode ? modeChoice : null;
+  /** Leaving Paper for another mode: open paper positions go unmanaged. */
+  const leavingPaper =
+    pendingMode !== null &&
+    pendingMode !== "paper" &&
+    (modeState?.running?.mode ?? desiredMode) === "paper";
+
   return (
     <main className="page">
       <header className="header">
@@ -432,18 +523,93 @@ export function App() {
           </p>
         </div>
         <div className="header-badges">
-          <span className={`ws-status ws-${status}`}>
-            <span className="dot" /> WebSocket: {status}
-          </span>
-          {mode && (
-            <span className={`mode-badge mode-${mode}`} role="status">
-              {mode === "sim"
-                ? "SIMULATED DATA"
-                : mode === "paper"
-                  ? "PAPER TRADING"
-                  : "LIVE — CONNECTED ACCOUNTS"}
+          <div className="header-badges-row">
+            <span className={`ws-status ws-${status}`}>
+              <span className="dot" /> WebSocket: {status}
             </span>
-          )}
+            {mode && (
+              <span className={`mode-badge mode-${mode}`} role="status">
+                {mode === "sim"
+                  ? "SIMULATED DATA"
+                  : mode === "paper"
+                    ? "PAPER TRADING"
+                    : "LIVE — CONNECTED ACCOUNTS"}
+              </span>
+            )}
+          </div>
+          <div className="mode-switch">
+            <div className="mode-switch-row">
+              <label className="mode-switch-label" htmlFor="fleet-mode-select">
+                Fleet mode
+              </label>
+              <select
+                id="fleet-mode-select"
+                className="mode-select"
+                aria-label="Fleet run mode"
+                value={modeChoice ?? desiredMode ?? "sim"}
+                disabled={modeBusy || modeSwitching || modeState === null}
+                onChange={(e) => {
+                  const next = e.target.value as FleetMode;
+                  setModeChoice(next === desiredMode ? null : next);
+                }}
+              >
+                <option value="sim">Simulator</option>
+                <option value="paper">Paper trading</option>
+                {/* Live is listed because the fleet has three modes, but
+                    LOCKED: going live is a per-bot, deliberate step and
+                    must never be one dropdown flip away from real money.
+                    When live trading is built, this option gets an
+                    arm-and-confirm step like the kill switch's (and the
+                    API stops refusing "connected" in ModeStore). */}
+                <option value="connected" disabled>
+                  Live cash account — not enabled yet
+                </option>
+              </select>
+            </div>
+            {modeSwitching && desiredMode && (
+              <p className="mode-note" role="status">
+                ⟳ Restarting the engine into {MODE_LABELS[desiredMode]}…
+              </p>
+            )}
+            {pendingMode && (
+              <div
+                className="mode-confirm"
+                role="alertdialog"
+                aria-label="Confirm mode switch"
+              >
+                <p className="mode-confirm-text">
+                  Switch the whole fleet to{" "}
+                  <strong>{MODE_LABELS[pendingMode]}</strong>? The engine
+                  will restart — the dashboard reconnects in a few seconds.
+                  {leavingPaper && (
+                    <>
+                      {" "}
+                      Open <strong>paper positions will sit unmanaged</strong>{" "}
+                      while the fleet is in {MODE_LABELS[pendingMode]} mode.
+                    </>
+                  )}
+                </p>
+                <div className="confirm-actions">
+                  <button
+                    className="btn"
+                    onClick={() => setModeChoice(null)}
+                    disabled={modeBusy}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="btn mode-switch-btn"
+                    onClick={confirmModeSwitch}
+                    disabled={modeBusy}
+                  >
+                    {modeBusy
+                      ? "Switching…"
+                      : `Switch to ${MODE_LABELS[pendingMode]}`}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 

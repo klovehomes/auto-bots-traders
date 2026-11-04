@@ -102,16 +102,26 @@ in paper/shadow mode until a per-bot live gate is approved (see PLAN.md).
 
 ## Run modes (MODE)
 
-The team has three run modes, set by the `MODE` env var (default
-`sim`). The team MODE is the ceiling: a bot file's own `mode` can hold
-that bot below it, never above it.
+The team has three run modes. The `MODE` env var (default `sim`) is
+only the *initial* default: since Phase 5 the dashboard has a mode
+switch (upper right, under the status indicator) whose choice the API
+persists to `MODE_STATE_PATH` on the data volume — and a stored choice
+beats the env value on every later boot. Flipping the switch makes the
+engine exit and Docker's restart policy relaunches it into the new
+mode; the boot log says where the mode came from (`(source: dashboard
+switch)` vs `(source: env)`). The switch offers `sim` and `paper`;
+**Live cash account is listed but locked** — going live stays a
+per-bot, deliberate step, never a dropdown flip. The team MODE is the
+ceiling: a bot file's own `mode` can hold that bot below it, never
+above it.
 
 - **`sim`** — synthetic market, no broker. A seeded random-walk price
   book, a small position book per bot with $5,000 of sim equity each, and
   opens/closes in each bot's own voice flowing through the normal event
-  pipeline. `GET /health` reports `mode: "sim"` and the web page shows a
-  **SIMULATED DATA** badge. This is the mode for running the stack on a
-  laptop under WSL + Docker — see `../LOCAL-RUN.md`.
+  pipeline. The web page shows a **SIMULATED DATA** badge (from the
+  engine's reported running mode, `GET /mode`). This is the mode for
+  running the stack on a laptop under WSL + Docker — see
+  `../LOCAL-RUN.md`.
 - **`paper`** — Alpaca paper account: the stub-aware connection check
   (plus the Phase 0 test emitter until real strategy workers land).
 - **`connected`** — live accounts. **Not implemented in this build**: the
@@ -123,7 +133,8 @@ that bot below it, never above it.
 
 | Variable | Used by | Default |
 |---|---|---|
-| `MODE` | engine, api | `sim` |
+| `MODE` | engine, api | `sim` (initial default only — a stored dashboard choice wins) |
+| `MODE_STATE_PATH` | api (writes), engine (reads at boot) | `data/mode-state.json`; Docker: `/data/mode-state.json` |
 | `ALPACA_API_KEY` / `ALPACA_API_SECRET` | engine | unset → stub mode |
 | `ALPACA_PAPER` | engine | `true` |
 | `INTERNAL_EVENT_TOKEN` | engine, api | `dev-token` |
