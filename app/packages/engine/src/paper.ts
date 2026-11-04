@@ -263,13 +263,30 @@ export function startPaperTrader(
   let haltCancelHandled = false;
   let booted = false;
 
-  /** Cancel this bot's open broker orders (kill switch: pending orders die). */
+  /**
+   * Cancel this bot's OWN open broker orders (kill switch: pending
+   * orders die). Phase 4 (2026-11-04): scoped to the order IDs in her
+   * own state — the account is shared with Snapback now, and the old
+   * cancel-by-universe sweep could have cancelled Snapback's resting
+   * orders on the overlapping symbols (SPY/QQQ/AAPL/MSFT/AMD).
+   */
   async function cancelOpenOrders(): Promise<void> {
-    const open = await client.getOpenOrders();
-    for (const o of open) {
-      if (params.universe.includes(o.symbol)) {
-        await client.cancelOrder(o.id);
-        console.log(`[paper] ${bot.name}: cancelled open order ${o.id} (${o.symbol})`);
+    const ids = [
+      ...state.pendingEntries.map((p) => p.orderId),
+      ...state.pendingExits.map((p) => p.orderId),
+    ];
+    const open = await client.getOpenOrders().catch(() => [] as AlpacaOrder[]);
+    for (const id of ids) {
+      const order = open.find((o) => o.id === id);
+      if (!order) continue;
+      try {
+        await client.cancelOrder(id);
+        console.log(`[paper] ${bot.name}: cancelled open order ${id} (${order.symbol})`);
+      } catch (err) {
+        console.warn(
+          `[paper] ${bot.name}: cancel of order ${id} failed:`,
+          err instanceof Error ? err.message : err,
+        );
       }
     }
   }
@@ -519,8 +536,19 @@ export function startPaperTrader(
         await cancelOpenOrders();
         state.pendingEntries = [];
         const positions: AlpacaPosition[] = await client.getPositions();
-        for (const pos of positions) {
-          if (!params.universe.includes(pos.symbol)) continue;
+        // Phase 4 (2026-11-04): close ONLY her tracked positions. The
+        // old sweep closed every broker position in her universe —
+        // with Snapback live on the same account, that would have
+        // liquidated Snapback's shares in the overlapping symbols.
+        for (const symbol of Object.keys(state.entries)) {
+          const pos = positions.find((p) => p.symbol === symbol);
+          if (!pos) {
+            failed.push({
+              codename: bot.codename, symbol,
+              reason: "tracked in state but no broker position to close",
+            });
+            continue;
+          }
           const entry = state.entries[pos.symbol];
           try {
             const order = await client.closePosition(pos.symbol);
@@ -556,21 +584,24 @@ export function startPaperTrader(
     }
   }
 
-  /** Adopt any broker positions we are not tracking (e.g. after state loss). */
+  /**
+   * Boot reconcile — STATE-ONLY (tightened in Phase 4, 2026-11-04).
+   * Until now this ADOPTED any untracked broker position in her
+   * universe (a safety net for state loss). With Snapback live on the
+   * same paper account and an overlapping universe (SPY/QQQ/AAPL/
+   * MSFT/AMD), adoption would have Trendia claiming Snapback's shares
+   * as her own on her next boot. Untracked positions are now logged
+   * as foreign and ignored; only positions in her own state (or with
+   * a pending exit) are managed.
+   */
   async function reconcile(): Promise<void> {
     const positions = await client.getPositions();
     for (const pos of positions) {
       if (!params.universe.includes(pos.symbol)) continue;
       if (!state.entries[pos.symbol] && !state.pendingExits.some((p) => p.symbol === pos.symbol)) {
-        state.entries[pos.symbol] = {
-          qty: pos.qty, entryPrice: pos.avgEntryPrice,
-          peak: pos.currentPrice, decisionId: "reconciled",
-        };
-        emit({
-          type: "open", symbol: pos.symbol, side: "buy", qty: pos.qty,
-          price: round2(pos.avgEntryPrice), pnl: null,
-          reason: `PAPER · position reconciled at engine start — ${pos.qty} shares held @ avg entry ${money(pos.avgEntryPrice)} (opened before this engine session)`,
-        });
+        console.log(
+          `[paper] ${bot.name}: foreign position ignored at boot — ${pos.qty} × ${pos.symbol} @ avg ${money(pos.avgEntryPrice)} is held on the shared account but is not in Trendia's state (state-only reconcile; never adopted)`,
+        );
       }
     }
     for (const symbol of Object.keys(state.entries)) {

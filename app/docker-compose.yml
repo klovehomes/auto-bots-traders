@@ -47,6 +47,9 @@ services:
       # Vega's state (tracked contracts, realized PnL, earnings map,
       # IV history) persists on the same shared data volume.
       VEGA_STATE_PATH: /data/paper-vega-state.json
+      # Phase 4 (Snapback): her state (tracked positions, pending
+      # orders, realized PnL) persists on the same shared data volume.
+      SNAPBACK_STATE_PATH: /data/paper-snapback-state.json
     volumes:
       - ../bots:/bots:ro
       - fleet-data:/data

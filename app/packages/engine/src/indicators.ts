@@ -25,6 +25,21 @@ export function sma(values: number[], period: number): number | null {
 }
 
 /**
+ * Standard deviation of the given values — POPULATION convention
+ * (divide by N, not N−1). This is the finance-standard choice: it is
+ * what Bollinger Bands use, and Snapback's z-score is a Bollinger-style
+ * stretch measure, so the band math must match. Null on an empty series.
+ */
+export function stdDev(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const variance =
+    values.reduce((sum, v) => sum + (v - mean) * (v - mean), 0) /
+    values.length;
+  return Math.sqrt(variance);
+}
+
+/**
  * RSI with Wilder smoothing. Returns null when fewer than period+1 closes.
  * Matches the classic Wilder formulation used by charting packages.
  */

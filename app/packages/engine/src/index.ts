@@ -9,6 +9,7 @@ import { checkAlpacaPaperConnection, createAlpacaClient } from "./alpaca.js";
 import { createControlClient } from "./control.js";
 import { createControlRouter, startPaperTrader } from "./paper.js";
 import { startSimulator } from "./sim.js";
+import { startSnapbackTrader } from "./snapback.js";
 import { startVegaTrader } from "./vega.js";
 
 const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:8080";
@@ -18,15 +19,18 @@ const FIRST_EVENT_DELAY_MS = 1000;
 
 /**
  * Runner registry — bots with a real strategy plugin on the paper
- * account: Trendia (Phase 1, daily bars) and Vega (Phase 3, options;
- * he starts in shadow mode per the Phase 3 scope, see vega.ts).
- * Every other bot stays on the simulator until its own phase lands.
+ * account: Trendia (Phase 1, daily bars), Vega (Phase 3, options;
+ * he starts in shadow mode per the Phase 3 scope, see vega.ts) and
+ * Snapback (Phase 4, hourly mean reversion). Every other bot stays
+ * on the simulator until its own phase lands.
  */
 const TRENDIA_CODENAME = "trendia";
 const VEGA_CODENAME = "vega";
+const SNAPBACK_CODENAME = "snapback";
 const PAPER_RUNNER_CODENAMES: readonly string[] = [
   TRENDIA_CODENAME,
   VEGA_CODENAME,
+  SNAPBACK_CODENAME,
 ];
 
 /** Publish one event to the API service, which fans it out over WebSocket. */
@@ -114,26 +118,29 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ---- MODE=paper (Phases 1 + 3) ---------------------------------------
-  // Trendia (Phase 1) and Vega (Phase 3) run on the real Alpaca paper
-  // account (real market data, simulated money) via their runners —
-  // Vega in shadow mode until VEGA_SHADOW=false. The remaining bots
-  // have no strategy plugin yet, so they keep running the simulator —
-  // clearly labelled SIM in their reason strings — until their turn.
+  // ---- MODE=paper (Phases 1 + 3 + 4) -----------------------------------
+  // Trendia (Phase 1), Vega (Phase 3) and Snapback (Phase 4) run on
+  // the real Alpaca paper account (real market data, simulated money)
+  // via their runners — Vega in shadow mode until VEGA_SHADOW=false.
+  // The remaining bots have no strategy plugin yet, so they keep
+  // running the simulator — clearly labelled SIM in their reason
+  // strings — until their turn.
   const vegaShadow =
     (process.env.VEGA_SHADOW ?? "true").trim().toLowerCase() !== "false";
   console.log(
     "[engine] MODE=paper — Trendia trades the Alpaca paper account on real market data; " +
       `Vega runs his Phase 3 options pipeline (${vegaShadow ? "SHADOW mode — no orders" : "live paper orders"}); ` +
-      "Snapback, Wesley and PolyCrypt9000 stay on the simulator",
+      "Snapback trades real paper entries/exits on her hourly mean-reversion runner; " +
+      "Wesley and PolyCrypt9000 stay on the simulator",
   );
   await checkAlpacaPaperConnection();
 
   const trendia = active.find((b) => b.codename === TRENDIA_CODENAME);
   const vega = active.find((b) => b.codename === VEGA_CODENAME);
+  const snapback = active.find((b) => b.codename === SNAPBACK_CODENAME);
   const client = createAlpacaClient();
 
-  if ((trendia || vega) && client) {
+  if ((trendia || vega || snapback) && client) {
     const router = createControlRouter(control);
     const running: string[] = [];
     if (trendia) {
@@ -144,19 +151,23 @@ async function main(): Promise<void> {
       startVegaTrader(vega, client, postEvent, router.forBots([VEGA_CODENAME]));
       running.push(VEGA_CODENAME);
     }
+    if (snapback) {
+      startSnapbackTrader(snapback, client, postEvent, router.forBots([SNAPBACK_CODENAME]));
+      running.push(SNAPBACK_CODENAME);
+    }
     const others = active.filter((b) => !running.includes(b.codename));
     if (others.length > 0) {
       startSimulator(others, postEvent, router.forOthers(running));
     }
   } else {
-    // No keys (or neither runner bot enabled): never fabricate a broker
+    // No keys (or no runner bot enabled): never fabricate a broker
     // connection. Fall back to the full simulator so the dashboard
     // still runs, and say so loudly in the log.
     console.warn(
       "[engine] MODE=paper but " +
         (!client
-          ? "Alpaca keys are not configured — Trendia and Vega CANNOT trade paper. Running the simulator for every bot instead."
-          : "neither Trendia nor Vega is among the enabled bots — running the simulator for every bot."),
+          ? "Alpaca keys are not configured — Trendia, Vega and Snapback CANNOT trade paper. Running the simulator for every bot instead."
+          : "none of Trendia, Vega or Snapback is among the enabled bots — running the simulator for every bot."),
     );
     startSimulator(active, postEvent, control);
   }

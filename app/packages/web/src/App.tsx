@@ -918,12 +918,12 @@ export function App() {
               </dd>
             </dl>
             <p className="hint">
-              Phase 1 + 3: Trendia's and Vega's decisions carry the full
-              record — trigger, indicator values, params snapshot and the
-              Risk-Gate verdict — in the reason text above (Vega's are
-              labelled SHADOW · while his soak runs). The other bots
-              still run the simulator (SIM ·) until their strategy
-              plugins land.
+              Phases 1 + 3 + 4: Trendia's, Vega's and Snapback's decisions
+              carry the full record — trigger, indicator values, params
+              snapshot and the Risk-Gate verdict — in the reason text
+              above (Vega's are labelled SHADOW · while his soak runs).
+              The other bots still run the simulator (SIM ·) until their
+              strategy plugins land.
             </p>
           </div>
         </div>
