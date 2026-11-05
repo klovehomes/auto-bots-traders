@@ -116,7 +116,40 @@ export function describeControl(
 
 const API_BASE = `http://${window.location.hostname}:8080`;
 const EVENTS_URL = `ws://${window.location.hostname}:8080/events`;
-const MAX_EVENTS = 400;
+
+/**
+ * Client-side stream retention (Phase 6) — mirrors the API's event
+ * history policy: decision records (decision_id non-null) are kept
+ * up to the most recent 5,000 and everything else (simulator
+ * chatter) up to the most recent 1,000, so a busy simulator hour can
+ * never push the day's sparse paper decisions out of the tab.
+ * The list is newest-first, so the caps keep the head of each class.
+ */
+const MAX_DECISION_EVENTS = 5000;
+const MAX_OTHER_EVENTS = 1000;
+
+function trimEvents(list: FleetEvent[]): FleetEvent[] {
+  let decisions = 0;
+  let others = 0;
+  const out: FleetEvent[] = [];
+  for (const e of list) {
+    if (e.decision_id !== null) {
+      if (decisions >= MAX_DECISION_EVENTS) continue;
+      decisions += 1;
+    } else {
+      if (others >= MAX_OTHER_EVENTS) continue;
+      others += 1;
+    }
+    out.push(e);
+  }
+  return out;
+}
+
+/** Shape of GET /events/history (Phase 6): stamped events, newest first. */
+interface EventHistoryResponse {
+  latestSeq: number;
+  events: FleetEvent[];
+}
 
 const params = new URLSearchParams(window.location.search);
 
@@ -169,6 +202,10 @@ export function App() {
   } | null>(null);
 
   const effectsRef = useRef<EffectEvent[]>([]);
+  /** Sequence numbers already in state (Phase 6): live frames and
+   *  history rows merge by seq — a frame whose seq is already here
+   *  is a duplicate and is dropped. */
+  const seenSeqRef = useRef<Set<number>>(new Set());
   const statsRef = useRef(computeStats([], []));
   const inspectAnchorRef = useRef<InspectAnchor | null>(null);
   const inspectControlRef = useRef<InspectControl | null>(null);
@@ -405,6 +442,62 @@ export function App() {
     };
   }, []);
 
+  // Event history (Phase 6): seed the stream from the API's stored
+  // history BEFORE relying on the live socket, so the Decisions tab
+  // shows the full day even if this tab was closed while the bots
+  // were deciding. The merge is by API sequence number: history rows
+  // already seen live (a frame can beat the fetch back) are skipped,
+  // and everything is unioned newest-first by seq.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/events/history`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<EventHistoryResponse>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const fresh = data.events.filter((e) => {
+          if (typeof e.seq !== "number") return true;
+          if (seenSeqRef.current.has(e.seq)) return false;
+          seenSeqRef.current.add(e.seq);
+          return true;
+        });
+        if (fresh.length === 0) return;
+        setEvents((prev) => {
+          const seen = new Set<number>();
+          const merged: FleetEvent[] = [];
+          // Live frames already in state are the newest — they keep
+          // the head. History follows, ordered by seq descending.
+          for (const e of prev) {
+            if (typeof e.seq === "number") {
+              if (seen.has(e.seq)) continue;
+              seen.add(e.seq);
+            }
+            merged.push(e);
+          }
+          const historyDesc = [...fresh].sort(
+            (a, b) => (b.seq ?? 0) - (a.seq ?? 0),
+          );
+          for (const e of historyDesc) {
+            if (typeof e.seq === "number") {
+              if (seen.has(e.seq)) continue;
+              seen.add(e.seq);
+            }
+            merged.push(e);
+          }
+          return trimEvents(merged);
+        });
+      })
+      .catch(() => {
+        // History is best-effort on load; the live stream still runs
+        // and any gap is limited to events from before this load.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     const ws = new WebSocket(EVENTS_URL);
     ws.onopen = () => setStatus("connected");
@@ -427,6 +520,11 @@ export function App() {
           return;
         }
         const event = parsed as FleetEvent;
+        // Phase 6: drop frames the history seed already delivered.
+        if (typeof event.seq === "number") {
+          if (seenSeqRef.current.has(event.seq)) return;
+          seenSeqRef.current.add(event.seq);
+        }
         if (event.type === "close" && event.pnl !== null && event.pnl !== 0) {
           effectsRef.current.push({
             bot: event.bot,
@@ -436,7 +534,7 @@ export function App() {
         } else if (event.type === "open") {
           effectsRef.current.push({ bot: event.bot, kind: "open", ts: Date.now() });
         }
-        setEvents((prev) => [event, ...prev].slice(0, MAX_EVENTS));
+        setEvents((prev) => trimEvents([event, ...prev]));
       } catch {
         // Ignore malformed frames; the stream is internal and typed.
       }
@@ -1124,8 +1222,10 @@ interface BuildingInspectProps {
  * avatar, equity and realized PnL, its CURRENT HOLDINGS (open positions
  * from the client team state) and, below them, TODAY'S TRADES — all
  * live: the App re-renders on every event, so an open dialog updates in
- * place. (Data caveat: the client state accumulates from page load —
- * there is no history API yet — so "today" is this session's stream.)
+ * place. (Data note: since Phase 6 the App seeds from the API's
+ * persisted event history — GET /events/history — and merges the live
+ * stream by sequence number, so "today" is the stored history plus
+ * this session's live events, not just what streamed past this tab.)
  *
  * Position: the scene publishes the building's name-plate anchor every
  * frame; this dialog re-reads it on its own rAF and pins itself under

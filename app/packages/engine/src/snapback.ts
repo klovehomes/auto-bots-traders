@@ -39,6 +39,23 @@ import { tradingDaysBetween } from "./vega.js";
  *   time-stop convention: Mon–Fri days strictly after the entry date);
  *   +4% gain at entry × 1.04; reversion complete when the latest price
  *   reaches the current 20-day mean of completed closes.
+ *
+ * PHASE 6 AMENDMENT (Keith, 2026-11-04 — "we are not trying to build
+ * a day trading bot here"): live evidence on 2026-11-04 showed the
+ * mean-reversion exit misfiring — she entered TSLA twice on the
+ * RSI(2) leg while price was ABOVE the 20-day mean ($389.03/$388.54
+ * vs mean $382.84), so "price ≥ mean" was already true at entry and
+ * the 30 s tick closed both positions within minutes (−$1.12,
+ * −$1.80). Two changes:
+ * - The mean-reversion exit now applies ONLY to positions entered
+ *   BELOW the 20-day mean (the dip she actually bought). The entry
+ *   records the mean at entry and which side of it the fill was on;
+ *   a position entered at/above the mean exits only on the +4%
+ *   target, the −5% stop, or the 5-day max hold.
+ * - Same-day re-entry cooldown: after any exit of a symbol, she does
+ *   not re-enter that symbol again on the same ET trading day (the
+ *   last-exit date per symbol persists in state; skips are counted
+ *   in the hourly evaluation summary as "cooldown-skips").
  * - Risk Gate before every entry, with her .md numbers: max position
  *   20% of her virtual book, max 6 positions, 1.5% daily loss cap.
  *   Quantity = floor(20% of book equity / latest price); zero shares
@@ -97,6 +114,17 @@ interface TrackedEntry {
   /** ET date (YYYY-MM-DD) the position was opened. */
   entryDate: string;
   decisionId: string;
+  /**
+   * The 20-day mean (of completed closes) at entry (Phase 6).
+   * Optional: positions tracked before Phase 6 lack it — it is
+   * derived on boot / first exit-check tick and persisted.
+   */
+  entryMean?: number;
+  /**
+   * True when the fill was BELOW the entry mean — only then does the
+   * mean-reversion exit apply (Phase 6; see the header amendment).
+   */
+  entryBelowMean?: boolean;
 }
 
 interface PendingEntry {
@@ -106,6 +134,8 @@ interface PendingEntry {
   estCost: number;
   decisionId: string;
   reason: string;
+  /** The 20-day mean at signal time (Phase 6); null on legacy pendings. */
+  meanAtSignal?: number | null;
 }
 
 interface PendingExit {
@@ -125,6 +155,9 @@ interface SnapbackState {
   entries: Record<string, TrackedEntry>;
   pendingEntries: PendingEntry[];
   pendingExits: PendingExit[];
+  /** ET date (YYYY-MM-DD) of each symbol's most recent exit fill —
+   *  the same-day re-entry cooldown (Phase 6). */
+  lastExitBySymbol: Record<string, string>;
   lastEvalHour: string | null;
   decisionCounter: number;
 }
@@ -222,6 +255,7 @@ export function startSnapbackTrader(
     entries: {},
     pendingEntries: [],
     pendingExits: [],
+    lastExitBySymbol: {},
     lastEvalHour: null,
     decisionCounter: 0,
   });
@@ -319,7 +353,7 @@ export function startSnapbackTrader(
   const paramsSnapshot = (): string =>
     `params snapshot: universe ${params.universe.length} symbols, trend filter price > ${TREND_PERIOD}DMA, ` +
     `entry z < ${Z_ENTRY} on the ${MEAN_PERIOD}-day mean (population SD) or RSI(${RSI_PERIOD}) < ${RSI_ENTRY}, ` +
-    `exits at the ${MEAN_PERIOD}-day mean / +${TAKE_PROFIT_PCT}% / stop ${params.stopLossPct}% / 5 trading days max hold, ` +
+    `exits at the ${MEAN_PERIOD}-day mean (only when entered below it) / +${TAKE_PROFIT_PCT}% / stop ${params.stopLossPct}% / 5 trading days max hold, no same-day re-entry after an exit, ` +
     `max_position_pct ${params.maxPositionPct}, max_positions ${params.maxPositions}, daily_loss_cap ${params.maxDailyLossPct}%`;
 
   let haltCancelHandled = false;
@@ -379,6 +413,36 @@ export function startSnapbackTrader(
     };
   }
 
+  /**
+   * Phase 6 legacy derivation: positions tracked before the
+   * entryMean/entryBelowMean fields existed get them derived from
+   * the entry price vs the CURRENT 20-day mean, then persisted.
+   * Called at boot reconcile (with the broker's current price) and
+   * again from the exit check if a position still lacks the fields
+   * (e.g. a legacy pending filled after boot). Never throws.
+   */
+  async function deriveEntrySide(
+    symbol: string,
+    entry: TrackedEntry,
+    price: number,
+  ): Promise<void> {
+    if (entry.entryBelowMean !== undefined) return;
+    try {
+      const stretch = await stretchFor(symbol, price);
+      if (stretch === null) return;
+      entry.entryMean = stretch.mean20;
+      entry.entryBelowMean = entry.entryPrice < stretch.mean20;
+      console.log(
+        `[snapback] ${bot.name}: ${symbol} position predates Phase 6 — derived entry side from the current ${MEAN_PERIOD}-day mean: ` +
+          `entry ${money(entry.entryPrice)} vs mean ${money(stretch.mean20)} → entered ${entry.entryBelowMean ? "BELOW" : "AT/ABOVE"} the mean ` +
+          `(mean-reversion exit ${entry.entryBelowMean ? "applies" : "does not apply"})`,
+      );
+      save();
+    } catch {
+      // No bars available yet — the exit check retries next tick.
+    }
+  }
+
   /** Cancel this bot's own open orders (kill switch: pending orders die). */
   async function cancelTrackedOrders(): Promise<void> {
     const ids = [
@@ -418,11 +482,22 @@ export function startSnapbackTrader(
         (order.status === "filled" || terminal)
       ) {
         // Full or partial fill — manage what the broker reports.
+        // Phase 6: record the mean at entry and which side of it the
+        // fill landed on — the mean-reversion exit reads entryBelowMean.
+        // A legacy pending without a recorded mean leaves the fields
+        // unset; boot/first-tick derivation fills them in.
         state.entries[p.symbol] = {
           qty: order.filledQty,
           entryPrice: order.filledAvgPrice,
           entryDate: etDate(now()),
           decisionId: p.decisionId,
+          ...(typeof p.meanAtSignal === "number" &&
+          Number.isFinite(p.meanAtSignal)
+            ? {
+                entryMean: p.meanAtSignal,
+                entryBelowMean: order.filledAvgPrice < p.meanAtSignal,
+              }
+            : {}),
         };
         state.pendingEntries = state.pendingEntries.filter(
           (x) => x.orderId !== p.orderId,
@@ -485,6 +560,9 @@ export function startSnapbackTrader(
         state.realizedByDay[day] = round2(
           (state.realizedByDay[day] ?? 0) + pnl,
         );
+        // Phase 6 cooldown: an exit fill today bars re-entry into
+        // this symbol for the rest of the ET trading day.
+        state.lastExitBySymbol[p.symbol] = day;
         const entry = state.entries[p.symbol];
         if (entry) {
           entry.qty -= filledQty;
@@ -577,6 +655,19 @@ export function startSnapbackTrader(
       } catch {
         stretch = null;
       }
+      // Phase 6 backstop: a position that still lacks its entry side
+      // (legacy state reconcile could not derive) gets it now, from
+      // the stretch this tick already computed.
+      if (entry.entryBelowMean === undefined && stretch !== null) {
+        entry.entryMean = stretch.mean20;
+        entry.entryBelowMean = entry.entryPrice < stretch.mean20;
+        console.log(
+          `[snapback] ${bot.name}: ${symbol} position predates Phase 6 — derived entry side from the current ${MEAN_PERIOD}-day mean: ` +
+            `entry ${money(entry.entryPrice)} vs mean ${money(stretch.mean20)} → entered ${entry.entryBelowMean ? "BELOW" : "AT/ABOVE"} the mean ` +
+            `(mean-reversion exit ${entry.entryBelowMean ? "applies" : "does not apply"})`,
+        );
+        save();
+      }
       const daysHeld = tradingDaysBetween(entry.entryDate, today);
       const stopPrice = entry.entryPrice * (1 - params.stopLossPct / 100);
       const targetPrice = entry.entryPrice * (1 + TAKE_PROFIT_PCT / 100);
@@ -597,7 +688,15 @@ export function startSnapbackTrader(
         why =
           `${symbol} @ ${money(price)} is +${(((price - entry.entryPrice) / entry.entryPrice) * 100).toFixed(1)}% over entry ${money(entry.entryPrice)} ` +
           `(target ${money(targetPrice)}) after ${daysHeld} trading day(s)`;
-      } else if (stretch !== null && price >= stretch.mean20) {
+      } else if (
+        stretch !== null &&
+        entry.entryBelowMean === true &&
+        price >= stretch.mean20
+      ) {
+        // Phase 6: the reversion exit exists to sell the recovery of
+        // a dip bought BELOW the mean. A position entered at/above
+        // the mean never takes this leg — price ≥ mean was already
+        // true at its entry, which is what churned TSLA on 2026-11-04.
         trigger = `reversion to the ${MEAN_PERIOD}-day mean`;
         why =
           `${symbol} @ ${money(price)} has returned to its ${MEAN_PERIOD}-day mean ${money(stretch.mean20)} ` +
@@ -616,6 +715,7 @@ export function startSnapbackTrader(
 
   /** The hourly entry evaluation during market hours. */
   async function evaluate(): Promise<void> {
+    const today = etDate(now());
     const positions: AlpacaPosition[] = await client
       .getPositions()
       .catch(() => []);
@@ -624,6 +724,7 @@ export function startSnapbackTrader(
     let entriesSubmitted = 0;
     let rejected = 0;
     let trendBlocked = 0;
+    let cooldownSkips = 0;
 
     for (const symbol of params.universe) {
       // One open position per underlying; no pyramiding.
@@ -663,6 +764,15 @@ export function startSnapbackTrader(
       const rsiFire = stretch.rsi2 !== null && stretch.rsi2 < RSI_ENTRY;
       if (!zFire && !rsiFire) {
         noSignal += 1;
+        continue;
+      }
+
+      // ---- Same-day re-entry cooldown (Phase 6) -------------------
+      // A symbol she already exited today is done for the day, even
+      // if the stretch fires again — no churn (see the header).
+      // Counted separately in the summary so the skip is visible.
+      if (state.lastExitBySymbol[symbol] === today) {
+        cooldownSkips += 1;
         continue;
       }
       const legs = [
@@ -779,6 +889,7 @@ export function startSnapbackTrader(
         estCost,
         decisionId,
         reason: `mean-reversion entry — ${legs}`,
+        meanAtSignal: stretch.mean20,
       });
       entriesSubmitted += 1;
       save();
@@ -786,7 +897,7 @@ export function startSnapbackTrader(
 
     console.log(
       `[snapback] ${bot.name}: hourly evaluation complete — ${entriesSubmitted} entries submitted, ` +
-        `${rejected} gate rejections, ${trendBlocked} trend-filter blocks, ${noSignal} no-signal; book equity ${money(bookEquity())}`,
+        `${rejected} gate rejections, ${trendBlocked} trend-filter blocks, ${cooldownSkips} cooldown-skips, ${noSignal} no-signal; book equity ${money(bookEquity())}`,
     );
   }
 
@@ -887,6 +998,9 @@ export function startSnapbackTrader(
         );
         tracked.qty = pos.qty;
       }
+      // Phase 6: positions tracked before the entry-side fields
+      // existed get them derived here, at boot (see deriveEntrySide).
+      await deriveEntrySide(pos.symbol, tracked, pos.currentPrice);
     }
     for (const symbol of Object.keys(state.entries)) {
       if (

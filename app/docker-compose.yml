@@ -20,6 +20,11 @@ services:
       # file at boot (stored beats the MODE env initial default) and
       # learns runtime changes through the internal control poll.
       MODE_STATE_PATH: /data/mode-state.json
+      # Phase 6 (event history): the API persists the event stream —
+      # decisions above all — on the same shared volume, so the
+      # dashboard's Decisions tab shows the full day even when no tab
+      # was open while the bots were deciding.
+      EVENT_HISTORY_PATH: /data/event-history.json
     volumes:
       # Bot definitions live outside the app image; mounted read-only.
       - ../bots:/bots:ro

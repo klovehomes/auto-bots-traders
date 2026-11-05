@@ -17,6 +17,7 @@ import {
   type LiquidationFailure,
 } from "./control.js";
 import { ModeStore } from "./mode.js";
+import { EventHistoryStore } from "./history.js";
 
 const PORT = Number(process.env.API_PORT ?? 8080);
 const INTERNAL_EVENT_TOKEN = process.env.INTERNAL_EVENT_TOKEN ?? "dev-token";
@@ -37,6 +38,14 @@ const CONTROL_STATE_PATH =
  */
 const MODE_STATE_PATH =
   process.env.MODE_STATE_PATH ?? "./data/mode-state.json";
+/**
+ * Where the event history persists (Phase 6). The event stream is the
+ * fleet's record of itself — decisions especially must survive both
+ * closed dashboard tabs and API restarts, so this lives on the same
+ * durable volume as the control and mode state.
+ */
+const EVENT_HISTORY_PATH =
+  process.env.EVENT_HISTORY_PATH ?? "./data/event-history.json";
 /** How long a kill-liquidate POST waits for the engine's report before
  *  answering with a still-pending report (the report completes over the
  *  WebSocket when it lands). The sim engine polls every 1 s. */
@@ -69,6 +78,19 @@ async function main(): Promise<void> {
   app.log.info(
     `mode state: ${MODE_STATE_PATH} (desired: ${modeStore.desiredMode()})`,
   );
+
+  // Event history (Phase 6): the stream's durable memory. Ingested
+  // events are appended here (which stamps their sequence number)
+  // BEFORE broadcast, and dashboards seed from GET /events/history so
+  // the Decisions tab shows the full day — not just whatever streamed
+  // while a tab happened to be open.
+  const historyStore = new EventHistoryStore(EVENT_HISTORY_PATH);
+  app.log.info(
+    `event history: ${EVENT_HISTORY_PATH} (${historyStore.size} retained events, latest seq ${historyStore.latestSeq()})`,
+  );
+  app.addHook("onClose", async () => {
+    historyStore.close();
+  });
 
   /** Live WebSocket clients subscribed to /events. */
   const clients = new Set<WebSocket>();
@@ -273,12 +295,21 @@ async function main(): Promise<void> {
         .code(400)
         .send({ error: "invalid event", details: parsed.error.issues });
     }
-    const payload = JSON.stringify(parsed.data);
+    // Persist FIRST (Phase 6): the store stamps the event's sequence
+    // number, and the stamped event is both the durable record and
+    // the broadcast frame — dashboards merge history and live by seq.
+    const stored = historyStore.append(parsed.data);
+    const payload = JSON.stringify(stored);
     for (const client of clients) {
       if (client.readyState === WebSocket.OPEN) client.send(payload);
     }
-    return { ok: true, delivered: clients.size };
+    return { ok: true, delivered: clients.size, seq: stored.seq };
   });
+
+  // Event history read-back (Phase 6): dashboards fetch this on load
+  // to seed the stream/Decisions state before merging live frames.
+  // Same trust boundary as the other read endpoints (private network).
+  app.get("/events/history", async () => historyStore.snapshot());
 
   app.get("/events", { websocket: true }, (socket) => {
     clients.add(socket);

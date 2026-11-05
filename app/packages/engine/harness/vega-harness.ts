@@ -23,6 +23,10 @@
  *      contract is entered
  *  14. boot re-seed: an untouched pre-doubling book re-seeds to
  *      $10,000; a touched book keeps its $5,000 start
+ *  15. Phase 6: a chain-fetch or snapshot-fetch failure emits a
+ *      NO TRADE decision carrying the error detail (never just a
+ *      console warning), and the hourly summary's outcome counts
+ *      close arithmetically on the signal count
  *
  * Run: npx tsx harness/vega-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -227,6 +231,9 @@ class FakeBroker implements AlpacaClientLike {
   latestPrices = new Map<string, number>();
   contracts = new Map<string, OptionContract[]>();
   snapshots = new Map<string, OptionSnapshot>();
+  /** Phase 6: when set, the corresponding fetch throws this error. */
+  contractsError: Error | null = null;
+  snapshotsError: Error | null = null;
   private orders = new Map<string, AlpacaOrder>();
   private seq = 0;
 
@@ -304,9 +311,11 @@ class FakeBroker implements AlpacaClientLike {
     return this.latestPrices.get(symbol) ?? 50;
   }
   async getOptionContracts(underlying: string, type: "call" | "put") {
+    if (this.contractsError) throw this.contractsError;
     return this.contracts.get(`${underlying}:${type}`) ?? [];
   }
   async getOptionSnapshots(symbols: string[]) {
+    if (this.snapshotsError) throw this.snapshotsError;
     const out = new Map<string, OptionSnapshot>();
     for (const s of symbols) {
       const snap = this.snapshots.get(s);
@@ -398,6 +407,42 @@ function boot(opts: {
 
 const readState = (path: string): Record<string, unknown> =>
   JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+
+/** Capture console.log lines (the evaluation summary is console-only). */
+function captureLogs(): { lines: string[]; stop: () => void } {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((a) => String(a)).join(" "));
+    orig(...args);
+  };
+  return {
+    lines,
+    stop: () => {
+      console.log = orig;
+    },
+  };
+}
+
+/** Parse Vega's hourly summary counts out of a captured log line. */
+function summaryCounts(
+  line: string,
+): Record<string, number> | null {
+  const grab = (label: string): number | null => {
+    const m = line.match(new RegExp(`(\\d+) ${label}`));
+    return m ? Number(m[1]) : null;
+  };
+  const out: Record<string, number> = {};
+  for (const label of [
+    "screened in", "signals", "entries submitted", "gate-rejected",
+    "no-trade", "fetch-failed", "earnings-blocked",
+  ]) {
+    const v = grab(label);
+    if (v === null) return null;
+    out[label] = v;
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------- tests
 
@@ -797,6 +842,85 @@ async function main(): Promise<void> {
     const st2 = readState(s2.statePath) as { startCapital?: number };
     check("re-seed: a touched book (realized −$50) keeps its $5,000 start",
       st2.startCapital === 5000, JSON.stringify({ startCapital: st2.startCapital }));
+  }
+
+  console.log("— S13: Phase 6 — fetch failures are decisions; summary counts close —");
+  {
+    // Chain fetch throws (the 2026-11-04 SMCI/RBLX shape): the AMD
+    // breakout signal must produce a NO TRADE decision carrying the
+    // error detail — not a bare console warning — and the summary
+    // must account for the signal as fetch-failed.
+    const cap = captureLogs();
+    const s = boot({ shadow: false, setup: (b) => {
+      b.hourlyBars.set("AMD", amdHourlyBars(T0));
+      amdChain(b);
+      b.contractsError = new Error(
+        'option contracts for AMD: HTTP 404 — {"code":404,"message":"not found"}',
+      );
+    } });
+    await until("chain-failure NO TRADE decision", () =>
+      s.events.some(
+        (e) => e.reason.includes("NO TRADE") && e.reason.includes("chain fetch failed"),
+      ));
+    const decision = s.events.find((e) => e.reason.includes("chain fetch failed"));
+    check("fetch: a chain-fetch failure emits a NO TRADE decision record",
+      !!decision && decision.type === "signal" && decision.symbol === "AMD",
+      decision?.reason);
+    check("fetch: the decision carries the error detail (HTTP 404 + body excerpt)",
+      !!decision && decision.reason.includes("HTTP 404") &&
+      decision.reason.includes("not found"),
+      decision?.reason);
+    check("fetch: no order was placed and no position opened",
+      s.broker.createdOrders.length === 0 &&
+      !s.events.some((e) => e.type === "open"));
+    await until("chain-failure summary line", () =>
+      cap.lines.some((l) => l.includes("hourly evaluation complete")));
+    const line = cap.lines.find((l) => l.includes("hourly evaluation complete"))!;
+    const counts = summaryCounts(line);
+    check("fetch: the summary counts the signal as fetch-failed",
+      counts !== null && counts["signals"] === 1 && counts["fetch-failed"] === 1,
+      line);
+    check("fetch: summary arithmetic closes (signals = entries + gate-rejected + no-trade + fetch-failed + earnings-blocked)",
+      counts !== null &&
+      counts["signals"] ===
+        counts["entries submitted"]! + counts["gate-rejected"]! +
+        counts["no-trade"]! + counts["fetch-failed"]! +
+        counts["earnings-blocked"]!,
+      line);
+    cap.stop();
+  }
+  {
+    // Snapshot fetch throws after a healthy chain: same treatment.
+    const cap = captureLogs();
+    const s = boot({ shadow: false, setup: (b) => {
+      b.hourlyBars.set("AMD", amdHourlyBars(T0));
+      amdChain(b);
+      b.snapshotsError = new Error("option snapshots: HTTP 500 — internal error");
+    } });
+    await until("snapshot-failure NO TRADE decision", () =>
+      s.events.some(
+        (e) => e.reason.includes("NO TRADE") && e.reason.includes("snapshot fetch failed"),
+      ));
+    const decision = s.events.find((e) => e.reason.includes("snapshot fetch failed"));
+    check("fetch: a snapshot-fetch failure emits a NO TRADE decision with the error detail",
+      !!decision && decision.reason.includes("HTTP 500") &&
+      decision.reason.includes("internal error"),
+      decision?.reason);
+    check("fetch: snapshot failure placed no order and opened no position",
+      s.broker.createdOrders.length === 0 &&
+      !s.events.some((e) => e.type === "open"));
+    await until("snapshot-failure summary line", () =>
+      cap.lines.some((l) => l.includes("hourly evaluation complete")));
+    const line = cap.lines.find((l) => l.includes("hourly evaluation complete"))!;
+    const counts = summaryCounts(line);
+    check("fetch: the snapshot failure also closes the summary arithmetic as fetch-failed",
+      counts !== null && counts["signals"] === 1 && counts["fetch-failed"] === 1 &&
+      counts["signals"] ===
+        counts["entries submitted"]! + counts["gate-rejected"]! +
+        counts["no-trade"]! + counts["fetch-failed"]! +
+        counts["earnings-blocked"]!,
+      line);
+    cap.stop();
   }
 
   console.log(

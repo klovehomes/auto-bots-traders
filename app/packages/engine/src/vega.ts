@@ -74,6 +74,16 @@ import {
  *
  * Milestone 3 (shares ballast / 75-25 mix) is intentionally NOT here
  * (D3): he runs options-only until the mix lands.
+ *
+ * PHASE 6 AMENDMENT (2026-11-04): a chain-fetch or snapshot-fetch
+ * failure is no longer a silent console warning. On 2026-11-04 his
+ * SMCI and RBLX signals died on "chain fetch failed: HTTP 404" with
+ * no decision record at all — invisible in the Decisions tab. Fetch
+ * failures now emit a NO TRADE decision carrying the error detail
+ * (the Alpaca client includes the response body excerpt), and the
+ * hourly summary accounts for every signal exactly once: entries
+ * submitted / gate-rejected / no-trade / fetch-failed /
+ * earnings-blocked sum to the signal count.
  */
 
 /**
@@ -1001,7 +1011,13 @@ export function startVegaTrader(
     let screenedIn = 0;
     let signals = 0;
     let entries = 0;
-    let rejected = 0;
+    // Phase 6: the old merged "rejected" bucket is split so the
+    // summary closes arithmetically — every signal lands in exactly
+    // one of entries / gateRejected / noTrade / fetchFailed /
+    // guardBlocked (see the summary line and PHASE6-DELIVERY.md).
+    let gateRejected = 0;
+    let noTrade = 0;
+    let fetchFailed = 0;
     let guardBlocked = 0;
 
     for (const symbol of params.pool) {
@@ -1068,7 +1084,7 @@ export function startVegaTrader(
         Object.values(book()).some((p) => p.underlying === symbol) ||
         state.pendingEntries.some((p) => p.underlying === symbol);
       if (heldHere) {
-        rejected += 1;
+        gateRejected += 1;
         emit({
           type: "signal",
           symbol,
@@ -1117,14 +1133,25 @@ export function startVegaTrader(
       try {
         contracts = await client.getOptionContracts(symbol, direction, gte, lte);
       } catch (err) {
-        console.warn(
-          `[vega] ${bot.name}: chain fetch for ${symbol} failed:`,
-          err instanceof Error ? err.message : err,
-        );
+        // Phase 6: a failed chain fetch is a DECISION, not a console
+        // whisper — the signal is accounted for (fetch-failed) and
+        // the error detail lands in the Decisions tab.
+        fetchFailed += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason:
+            `${tag} · ENTRY signal — ${screenText} · Contract pick: NO TRADE — chain fetch failed for ${symbol} ${direction}s ` +
+            `in the 2–4 week expiry window (${gte} → ${lte}): ${err instanceof Error ? err.message : String(err)} · ${paramsSnapshot()}`,
+        });
         continue;
       }
       if (contracts.length === 0) {
-        rejected += 1;
+        noTrade += 1;
         emit({
           type: "signal",
           symbol,
@@ -1142,10 +1169,20 @@ export function startVegaTrader(
           contracts.map((c) => c.symbol),
         );
       } catch (err) {
-        console.warn(
-          `[vega] ${bot.name}: snapshot fetch for ${symbol} chain failed:`,
-          err instanceof Error ? err.message : err,
-        );
+        // Phase 6: same rule as the chain fetch — a decision record,
+        // counted fetch-failed, never just a console warning.
+        fetchFailed += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason:
+            `${tag} · ENTRY signal — ${screenText} · Contract pick: NO TRADE — snapshot fetch failed for the ${symbol} chain ` +
+            `(${contracts.length} contracts listed in the window): ${err instanceof Error ? err.message : String(err)} · ${paramsSnapshot()}`,
+        });
         continue;
       }
       const candidates: ChainCandidate[] = contracts
@@ -1158,7 +1195,7 @@ export function startVegaTrader(
       recordIv(symbol, candidates, pickTarget);
       const pick = pickContract(candidates, today, direction, price);
       if (!pick.ok) {
-        rejected += 1;
+        noTrade += 1;
         emit({
           type: "signal",
           symbol,
@@ -1188,7 +1225,7 @@ export function startVegaTrader(
       // exactly one rejection record.
       const capDollars = bookEquity() * (params.maxPositionPct / 100);
       if (premiumDollars > capDollars + 1e-9) {
-        rejected += 1;
+        gateRejected += 1;
         emit({
           type: "signal",
           symbol: contract.symbol,
@@ -1225,7 +1262,7 @@ export function startVegaTrader(
       }
 
       if (verdict !== null) {
-        rejected += 1;
+        gateRejected += 1;
         emit({
           type: "signal",
           symbol: contract.symbol,
@@ -1303,7 +1340,8 @@ export function startVegaTrader(
 
     console.log(
       `[vega] ${bot.name}: hourly evaluation complete (${tag}) — ${screenedIn} screened in, ${signals} signals, ` +
-        `${entries} entries ${shadow ? "intended" : "submitted"}, ${rejected} rejected/no-trade, ${guardBlocked} earnings-blocked; ` +
+        `${entries} entries ${shadow ? "intended" : "submitted"}, ${gateRejected} gate-rejected, ${noTrade} no-trade, ` +
+        `${fetchFailed} fetch-failed, ${guardBlocked} earnings-blocked; ` +
         `book equity ${money(bookEquity())}`,
     );
   }

@@ -1,11 +1,15 @@
 import type { BotConfig, FleetEvent } from "@fleet/shared/types";
 
 /**
- * Client-side aggregation over the live event stream.
+ * Client-side aggregation over the event stream.
  *
- * The Phase 0 API has no history endpoint, so every aggregate on this page
- * (equity, win rate, drawdown, YTD totals) is computed from the events the
- * browser has seen since it connected. Reloading the page resets them.
+ * Since Phase 6 the App seeds from the API's persisted event history
+ * (GET /events/history) and merges the live stream by sequence
+ * number, so every aggregate on this page (equity, win rate,
+ * drawdown, YTD totals) is computed over the API's retained history
+ * plus this session's live events — reloading the page no longer
+ * resets them; the retention caps (5,000 decision records, 1,000
+ * other events) bound how far back they reach.
  */
 
 /**

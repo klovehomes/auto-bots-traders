@@ -142,6 +142,26 @@ function toOrder(o: RawOrder): AlpacaOrder {
   };
 }
 
+/**
+ * Build an error for a non-OK data-API response that carries the
+ * HTTP status AND a bounded excerpt of the response body (Phase 6).
+ * A bare "HTTP 404" explains nothing — on 2026-11-04 Vega's SMCI and
+ * RBLX signals died on exactly that, invisibly. The body excerpt
+ * (whitespace-collapsed, capped) is what Alpaca actually said, and it
+ * lands in Vega's NO TRADE decision record via the thrown error.
+ */
+async function httpError(context: string, res: Response): Promise<Error> {
+  let excerpt = "";
+  try {
+    excerpt = (await res.text()).replace(/\s+/g, " ").trim().slice(0, 300);
+  } catch {
+    // Body unreadable — the status alone will have to do.
+  }
+  return new Error(
+    `${context}: HTTP ${res.status}${excerpt ? ` — ${excerpt}` : ""}`,
+  );
+}
+
 function keysConfigured(): { keyId: string; secretKey: string } | null {
   const keyId = process.env.ALPACA_API_KEY;
   const secretKey = process.env.ALPACA_API_SECRET;
@@ -323,9 +343,7 @@ export function createAlpacaClient(): AlpacaClientLike | null {
           },
         });
         if (!res.ok) {
-          throw new Error(
-            `option contracts for ${underlying}: HTTP ${res.status}`,
-          );
+          throw await httpError(`option contracts for ${underlying}`, res);
         }
         const body = (await res.json()) as {
           option_contracts?: {
@@ -374,7 +392,7 @@ export function createAlpacaClient(): AlpacaClientLike | null {
           },
         });
         if (!res.ok) {
-          throw new Error(`option snapshots: HTTP ${res.status}`);
+          throw await httpError("option snapshots", res);
         }
         const body = (await res.json()) as {
           snapshots?: Record<

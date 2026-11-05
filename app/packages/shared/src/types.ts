@@ -83,4 +83,11 @@ export interface FleetEvent {
   reason: string;
   /** ISO-8601 timestamp. */
   ts: string;
+  /**
+   * Monotonic sequence number assigned by the API at ingest (Phase 6
+   * event history). Engine payloads never carry it — the API stamps it
+   * onto the stored record and the WebSocket broadcast so dashboards
+   * can dedupe history vs live and merge without gaps or repeats.
+   */
+  seq?: number;
 }

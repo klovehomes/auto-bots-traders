@@ -22,6 +22,12 @@
  *      a restart (the reconciled position stays exit-managed)
  *  11. partial fill tracked at the broker-reported quantity
  *  12. boot re-seed: untouched $5,000 book → $10,000; touched stays
+ *  13. Phase 6: the mean-reversion exit applies only to positions
+ *      entered BELOW the mean (an RSI(2) entry above the mean holds
+ *      and exits on +4% instead — the 2026-11-04 TSLA churn shape);
+ *      same-day re-entry cooldown after an exit (next day allowed);
+ *      legacy positions without the entry-side fields derive them
+ *      at boot and behave accordingly
  *
  * Run: npx tsx harness/snapback-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -162,6 +168,36 @@ const shallowCloses = [...flat(80, 220), ...flat(100, 19), 99];
  * but one share ($2,250) exceeds 20% of the $10,000 book ($2,000).
  */
 const priceyCloses = [...flat(2000, 220), ...flat(2500, 19), 2125];
+/**
+ * Above-mean RSI name (Phase 6 — the 2026-11-04 TSLA shape): the
+ * last 20 closes are 10 × $60, 6 × $100, then 99/97/94/92 stepping
+ * down (mean $79.10, SD ≈ $19.20, 200DMA ≈ $57.41). A live price of
+ * $91.50 sits ABOVE the 20-day mean (z ≈ +0.65 — no z fire) but the
+ * closing staircase drives RSI(2) to ≈ 1.5, so the RSI leg alone
+ * enters, above the mean. +4% target: $95.16.
+ */
+const aboveMeanRsiCloses = [
+  ...flat(55, 220),
+  ...flat(60, 10),
+  ...flat(100, 6),
+  99, 97, 94, 92,
+];
+
+/** Capture console.log lines (the runners' summaries are console-only). */
+function captureLogs(): { lines: string[]; stop: () => void } {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((a) => String(a)).join(" "));
+    orig(...args);
+  };
+  return {
+    lines,
+    stop: () => {
+      console.log = orig;
+    },
+  };
+}
 
 // ---------------------------------------------------------- fake broker
 
@@ -749,6 +785,156 @@ async function main(): Promise<void> {
     const st3 = readState(s3.statePath) as { startCapital?: number };
     check("re-seed: a legacy file with no startCapital reads as $5,000 and re-seeds untouched",
       st3.startCapital === 10000, `startCapital=${st3.startCapital}`);
+  }
+
+  console.log("— S13: Phase 6 — entry-side exit gating, re-entry cooldown, legacy state —");
+  {
+    // RSI(2) entry ABOVE the mean: the position must HOLD through
+    // ticks at/above the mean and exit on +4% — under the old rule
+    // the first tick at/above the mean closed it (the TSLA churn).
+    const s = boot({
+      setup: (b) => {
+        b.dailyBars.set("SPY", barsFromCloses(aboveMeanRsiCloses));
+        b.latestPrices.set("SPY", 91.5);
+      },
+    });
+    await until("above-mean RSI entry order", () => s.broker.createdOrders.length === 1);
+    const order = s.broker.createdOrders[0]!;
+    check("above-mean: RSI(2)-leg entry fires above the 20-day mean, 21 shares",
+      order.symbol === "SPY" && order.side === "buy" && order.qty === 21,
+      JSON.stringify(order));
+    await until("above-mean fill tracked", () =>
+      s.events.some((e) => e.type === "open" && e.symbol === "SPY"));
+    const st = readState(s.statePath) as {
+      entries: Record<string, { entryMean?: number; entryBelowMean?: boolean }>;
+    };
+    check("above-mean: state records the entry mean ($79.10) and entryBelowMean=false",
+      Math.abs((st.entries.SPY?.entryMean ?? 0) - 79.1) < 0.01 &&
+      st.entries.SPY?.entryBelowMean === false,
+      JSON.stringify(st.entries.SPY));
+    // $95.00 ≥ mean ($79.10) but < the +4% target ($95.16): hold.
+    s.broker.latestPrices.set("SPY", 95);
+    await sleep(450);
+    check("above-mean: NO mean-reversion exit while price rides above the entry mean",
+      !s.events.some((e) => e.type === "close") &&
+      !s.broker.createdOrders.some((o) => o.side === "sell") &&
+      entriesOf(s.statePath).SPY?.qty === 21);
+    s.broker.latestPrices.set("SPY", 95.3);
+    await until("above-mean take-profit close", () =>
+      s.events.some((e) => e.type === "close" && e.symbol === "SPY"));
+    const close = s.events.find((e) => e.type === "close");
+    check("above-mean: the position exits on the +4% take profit instead, pnl +$79.80",
+      close?.pnl === 79.8 && close.reason.includes("take profit"),
+      `pnl=${close?.pnl} reason=${close?.reason}`);
+  }
+  {
+    // Cooldown: shallow-dip entry exits at the mean; the same symbol
+    // re-signals an hour later the same day → skipped (and counted);
+    // the next trading day she may re-enter.
+    const cap = captureLogs();
+    const s = boot({
+      setup: (b) => {
+        b.dailyBars.set("SPY", barsFromCloses(shallowCloses));
+        b.latestPrices.set("SPY", 98);
+      },
+    });
+    await until("cooldown entry", () => s.broker.createdOrders.length === 1);
+    s.broker.latestPrices.set("SPY", 100.5);
+    await until("cooldown mean exit", () =>
+      s.events.some((e) => e.type === "close" && e.symbol === "SPY"));
+    const stAfterExit = readState(s.statePath) as {
+      lastExitBySymbol?: Record<string, string>;
+    };
+    check("cooldown: the exit records SPY's last-exit date (2026-11-04) in state",
+      stAfterExit.lastExitBySymbol?.SPY === "2026-11-04",
+      JSON.stringify(stAfterExit.lastExitBySymbol));
+    s.broker.latestPrices.set("SPY", 98);
+    s.setNow(new Date("2026-11-04T16:00:00Z")); // 11:00 ET, same day
+    await until("cooldown evaluation summary", () =>
+      cap.lines.some(
+        (l) => l.includes("hourly evaluation complete") && l.includes("1 cooldown-skips"),
+      ));
+    check("cooldown: same-day re-signal is skipped — no second buy, no second open",
+      s.broker.createdOrders.filter((o) => o.side === "buy").length === 1 &&
+      s.events.filter((e) => e.type === "open").length === 1);
+    check("cooldown: the skip is surfaced in the hourly summary as a cooldown-skip",
+      cap.lines.some((l) => l.includes("1 cooldown-skips")));
+    s.setNow(new Date("2026-11-05T15:00:00Z")); // Thu 10:00 ET
+    await until("next-day re-entry", () =>
+      s.broker.createdOrders.filter((o) => o.side === "buy").length === 2);
+    check("cooldown: next trading day she may re-enter the same symbol",
+      s.broker.createdOrders.filter((o) => o.side === "buy").length === 2);
+    cap.stop();
+  }
+  {
+    // Legacy (a): a pre-Phase-6 position entered BELOW the mean
+    // derives entryBelowMean=true at boot; the mean exit protects it.
+    const s = boot({
+      seedState: {
+        entries: {
+          SPY: { qty: 10, entryPrice: 98, entryDate: "2026-11-04", decisionId: "legacy-spy" },
+        },
+      },
+      setup: (b) => {
+        b.positions.push({
+          symbol: "SPY", qty: 10, avgEntryPrice: 98,
+          currentPrice: 98, marketValue: 980,
+        });
+        b.dailyBars.set("SPY", barsFromCloses(shallowCloses));
+        b.latestPrices.set("SPY", 98);
+      },
+    });
+    await until("legacy below-mean derivation persisted", () => {
+      const st = readState(s.statePath) as {
+        entries: Record<string, { entryBelowMean?: boolean }>;
+      };
+      return st.entries.SPY?.entryBelowMean === true;
+    });
+    const stA = readState(s.statePath) as {
+      entries: Record<string, { entryMean?: number; entryBelowMean?: boolean }>;
+    };
+    check("legacy: a pre-Phase-6 position below the mean derives entryBelowMean=true (mean $99.95) at boot",
+      stA.entries.SPY?.entryBelowMean === true &&
+      Math.abs((stA.entries.SPY?.entryMean ?? 0) - 99.95) < 0.01,
+      JSON.stringify(stA.entries.SPY));
+    s.broker.latestPrices.set("SPY", 100.5);
+    await until("legacy mean exit", () =>
+      s.events.some((e) => e.type === "close" && e.symbol === "SPY"));
+    check("legacy: the derived position still exits at the mean, pnl +$25.00",
+      s.events.some(
+        (e) => e.type === "close" && e.pnl === 25 && e.reason.includes("reversion"),
+      ));
+  }
+  {
+    // Legacy (b): a pre-Phase-6 position entered ABOVE the mean
+    // derives entryBelowMean=false; price ≥ mean all day must NOT
+    // churn it out (stop $95.57 / target $104.62 stay untouched).
+    const s = boot({
+      seedState: {
+        entries: {
+          SPY: { qty: 10, entryPrice: 100.6, entryDate: "2026-11-04", decisionId: "legacy-spy-hi" },
+        },
+      },
+      setup: (b) => {
+        b.positions.push({
+          symbol: "SPY", qty: 10, avgEntryPrice: 100.6,
+          currentPrice: 100.6, marketValue: 1006,
+        });
+        b.dailyBars.set("SPY", barsFromCloses(shallowCloses));
+        b.latestPrices.set("SPY", 100.6);
+      },
+    });
+    await until("legacy above-mean derivation persisted", () => {
+      const st = readState(s.statePath) as {
+        entries: Record<string, { entryBelowMean?: boolean }>;
+      };
+      return st.entries.SPY?.entryBelowMean === false;
+    });
+    await sleep(450);
+    check("legacy: a pre-Phase-6 position above the mean derives entryBelowMean=false and is NOT churned out at the mean",
+      !s.events.some((e) => e.type === "close") &&
+      !s.broker.createdOrders.some((o) => o.side === "sell") &&
+      entriesOf(s.statePath).SPY?.qty === 10);
   }
 
   console.log(
