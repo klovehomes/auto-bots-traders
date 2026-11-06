@@ -1,0 +1,57 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    environment:
+      API_PORT: "8080"
+      INTERNAL_EVENT_TOKEN: ${INTERNAL_EVENT_TOKEN:-dev-token}
+      MODE: ${MODE:-sim}
+      BOTS_DIR: /bots
+      # Risk Gate control state (kill switch halts + audit log) lives on
+      # a named volume so a halt survives container restarts/rebuilds.
+      CONTROL_STATE_PATH: /data/control-state.json
+    volumes:
+      # Bot definitions live outside the app image; mounted read-only.
+      - ../bots:/bots:ro
+      - fleet-data:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  engine:
+    build:
+      context: .
+      dockerfile: packages/engine/Dockerfile
+    environment:
+      API_BASE_URL: http://api:8080
+      INTERNAL_EVENT_TOKEN: ${INTERNAL_EVENT_TOKEN:-dev-token}
+      MODE: ${MODE:-sim}
+      BOTS_DIR: /bots
+      ALPACA_API_KEY: ${ALPACA_API_KEY:-}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
+      ALPACA_PAPER: ${ALPACA_PAPER:-true}
+      # Phase 1 paper-trader state (Trendia's peaks, entries, pending
+      # orders, realized PnL) persists on the shared data volume so a
+      # restart reconciles instead of forgetting open positions.
+      PAPER_STATE_PATH: /data/paper-trendia-state.json
+    volumes:
+      - ../bots:/bots:ro
+      - fleet-data:/data
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    ports:
+      - "4173:4173"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  # API-owned persistent state (kill-switch control state today).
+  fleet-data:
