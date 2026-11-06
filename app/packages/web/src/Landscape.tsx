@@ -80,10 +80,44 @@ const BASE_TOWER_H = 3.9; // tower height when equity == START_EQUITY
  * bots loom without dwarfing the city. The equity ratio is clamped to
  * [0.15, 4] so heights stay sane whatever the stream does.
  */
-function heightForEquity(equity: number): number {
+export function heightForEquity(equity: number): number {
   const ratio = Math.min(4, Math.max(0.15, equity / START_EQUITY));
   return BASE_TOWER_H * Math.pow(ratio, 0.75);
 }
+
+/**
+ * Standing relative height cap (Keith, 2026-11-06 — every version of
+ * this landscape, private dashboard and public showcase alike): once
+ * the tallest building would stand more than MAX_HEIGHT_RATIO × the
+ * shortest, it stops growing:
+ *
+ *     h_i := min(h_i, MAX_HEIGHT_RATIO × min_j h_j)
+ *
+ * The ceiling is dynamic — it rises as the shortest building grows.
+ * Purely visual: equities, name plates, ordering, beams, and the
+ * inspect dialogs are untouched; only rendered heights clamp.
+ */
+export const MAX_HEIGHT_RATIO = 4;
+
+export function applyHeightCap(heights: number[]): number[] {
+  if (heights.length === 0) return [];
+  const ceiling = MAX_HEIGHT_RATIO * Math.min(...heights);
+  return heights.map((h) => Math.min(h, ceiling));
+}
+
+/** Formula heights for a row of equities, relative cap applied. */
+export function cappedHeightsForEquities(equities: number[]): number[] {
+  return applyHeightCap(equities.map(heightForEquity));
+}
+
+/**
+ * Standing framing rule (Keith, 2026-11-06): the camera frames ~25%
+ * closer than the original shot so the five towers fill more of the
+ * screen, on desktop and phone alike. A 1.25× zoom = camera distance
+ * × 1/1.25 = × 0.8 from the look-at point; the render loop applies it
+ * by pulling the drifted camera position toward its target. Tunable.
+ */
+export const FRAMING_ZOOM = 1.25;
 
 /**
  * DEMO-ONLY height spread, enabled with ?demoheights=1. Sim equities
@@ -692,10 +726,15 @@ export function Landscape({
     /** Raycast targets for building inspection (see the inspect block). */
     const hitTargets: THREE.Object3D[] = [];
     const n = bots.length;
-    // Portrait screens get a tighter arc so the city fills the narrow frame.
+    // Portrait screens get a tighter arc so the city fills the narrow
+    // frame. Tightened further 2026-11-06 (spread 1.05 → 0.88, radius
+    // 9.5 → 8.5) as the compensating tweak for the FRAMING_ZOOM
+    // close-up: it holds the outer towers' worst-case on-screen extent
+    // at the pre-zoom level on narrow phones instead of letting the
+    // closer camera push them off the edges.
     const initAspect = container.clientWidth / Math.max(1, container.clientHeight);
-    const arcSpread = initAspect < 1 ? 1.05 : 1.7;
-    const arcRadius = initAspect < 1 ? 9.5 : 11.5;
+    const arcSpread = initAspect < 1 ? 0.88 : 1.7;
+    const arcRadius = initAspect < 1 ? 8.5 : 11.5;
     const pipeMat = new THREE.MeshStandardMaterial({ color: "#131824", roughness: 0.45, metalness: 0.65 });
     const darkMetal = new THREE.MeshStandardMaterial({ color: "#05070c", roughness: 0.4, metalness: 0.6 });
     // Satellite dishes: dark metal; the only life is a faint cool rim
@@ -1385,6 +1424,8 @@ export function Landscape({
 
     // --- Render loop ---
     let raf = 0;
+    /** Scratch look-at target for the per-frame camera framing. */
+    const camTarget = new THREE.Vector3();
     const clock = new THREE.Clock();
     let lastLabelCheck = 0;
 
@@ -1398,15 +1439,20 @@ export function Landscape({
       // Idle camera drift. Portrait/phone viewports frame much closer
       // by default (Keith, 2026-11-01): lower, nearer, and aimed at the
       // towers so the city fills the narrow card instead of bunching at
-      // the top over a field of empty ground. Desktop framing is the
-      // original wide shot, unchanged.
+      // the top over a field of empty ground. Since 2026-11-06 every
+      // viewport additionally frames ~25% closer (FRAMING_ZOOM).
       const portrait = viewAspect < 1;
       const camZ = portrait ? 13.2 : viewAspect < 1.5 ? 20 : 17.5;
       camera.position.x = Math.sin(t * 0.07) * (portrait ? 1.3 : 2.3);
       camera.position.y =
         (portrait ? 6.3 : 9.4) + Math.sin(t * 0.11) * (portrait ? 0.35 : 0.55);
       camera.position.z = camZ + Math.cos(t * 0.05) * (portrait ? 0.5 : 0.9);
-      camera.lookAt(0, portrait ? 2.6 : 2.1, portrait ? -3.0 : -3.4);
+      // Standing framing rule (Keith, 2026-11-06): ~25% closer on every
+      // viewport — pull the drifted camera toward its look-at point by
+      // FRAMING_ZOOM (distance × 0.8) so the towers fill more of the screen.
+      camTarget.set(0, portrait ? 2.6 : 2.1, portrait ? -3.0 : -3.4);
+      camera.position.sub(camTarget).divideScalar(FRAMING_ZOOM).add(camTarget);
+      camera.lookAt(camTarget);
 
       // Building-inspect hover/tap state machine (mouse intent, close
       // grace, dialog anchor) — resolved before the frame renders.
@@ -1587,14 +1633,22 @@ export function Landscape({
       // Name plates + height targets (throttled).
       if (now - lastLabelCheck > 250) {
         lastLabelCheck = now;
-        for (const b of buildings) {
+        // Heights are derived for the whole row first so the standing
+        // relative cap (applyHeightCap) can clamp them against each
+        // other before any target is assigned.
+        const displayEquities = buildings.map((b) => {
           const stats = statsRef.current.get(b.bot.name);
           const realEquity = stats ? stats.equity : START_EQUITY;
           // ?demoheights=1 overrides display equity only (see DEMO_EQUITIES).
-          const equity = demoHeights
+          return demoHeights
             ? (DEMO_EQUITIES[b.bot.codename.toLowerCase()] ?? realEquity)
             : realEquity;
-          b.targetH = heightForEquity(equity);
+        });
+        const cappedHeights = cappedHeightsForEquities(displayEquities);
+        buildings.forEach((b, i) => {
+          const stats = statsRef.current.get(b.bot.name);
+          const equity = displayEquities[i]!;
+          b.targetH = cappedHeights[i]!;
           const openCount = stats ? stats.openPositions.length : 0;
           const realized = demoHeights
             ? equity - START_EQUITY
@@ -1611,7 +1665,7 @@ export function Landscape({
               : `${openCount} open · ${fmtMoney(realized, true)} realized`,
             plateHalted ? "#ff6a55" : "#8b98a9",
           );
-        }
+        });
       }
 
       // Shocks.
