@@ -1,0 +1,26 @@
+# TraderBot public showcase — Cloudflare Pages project config.
+#
+# Used by `wrangler pages deploy` / `wrangler pages dev`. The packaging
+# script (app/tools/package-showcase.mjs) copies this file into the
+# deployable site root next to the built pages and the functions/ tree.
+#
+# SECRETS ARE NOT HERE. SESSION_SECRET, RESEND_API_KEY and MAIL_FROM
+# are set as Pages project secrets (dashboard: Settings → Environment
+# variables, or `wrangler pages secret put <NAME>`). Never commit real
+# values anywhere.
+
+name = "traderbots-showcase"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-11-06"
+
+# Phase 9 (v17) — D1 database for the email gate (registrations,
+# activation-code hashes, rate-limit events). Binding name MUST be DB
+# (the functions read env.DB).
+#
+# Keith: create the database, then replace database_id below with the
+# real id `wrangler d1 create` prints:
+#   wrangler d1 create traderbots-showcase
+[[d1_databases]]
+binding = "DB"
+database_name = "traderbots-showcase"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"

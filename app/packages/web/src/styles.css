@@ -1214,3 +1214,116 @@ body {
   gap: 10px;
   align-items: baseline;
 }
+
+/* ── Phase 9: email gate (src/gate.tsx, gate.html only) ─────────────
+   The public front door: a centered card with the TraderBot logo, an
+   email form, then a 6-digit code form. Rendered only by the gate
+   entry — neither the showcase app nor the private dashboard use
+   these classes. */
+.gate-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+.gate-card {
+  width: 100%;
+  max-width: 430px;
+  text-align: center;
+  padding: 30px 26px 22px;
+  border: 1px solid rgba(139, 152, 169, 0.35);
+  border-radius: 16px;
+  background: rgba(13, 17, 23, 0.72);
+}
+.gate-logo {
+  border-radius: 50%;
+  margin-bottom: 10px;
+}
+.gate-title {
+  margin: 0;
+  font-size: 26px;
+}
+.gate-tagline {
+  margin: 2px 0 14px;
+  color: #f5d67b;
+  font-size: 12.5px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.gate-copy {
+  color: #c9d4e0;
+  font-size: 14.5px;
+  line-height: 1.55;
+  margin: 0 0 16px;
+}
+.gate-success {
+  color: #3fb950;
+  font-weight: 600;
+}
+.gate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gate-input {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(139, 152, 169, 0.45);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e6edf3;
+  font-size: 15px;
+  text-align: center;
+}
+.gate-input:focus {
+  outline: 2px solid rgba(245, 214, 123, 0.6);
+  outline-offset: 1px;
+}
+.gate-code {
+  font-size: 22px;
+  letter-spacing: 0.35em;
+  font-weight: 700;
+}
+.gate-button {
+  padding: 12px 14px;
+  border: none;
+  border-radius: 10px;
+  background: #f5d67b;
+  color: #16130a;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.gate-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.gate-link {
+  margin-top: 12px;
+  background: none;
+  border: none;
+  color: #8b98a9;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.gate-error {
+  margin: 14px 0 0;
+  color: #f08a8a;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.gate-devbox {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(245, 214, 123, 0.7);
+  border-radius: 10px;
+  color: #f5d67b;
+  font-size: 14px;
+}
+.gate-footer {
+  margin: 20px 0 0;
+  color: #8b98a9;
+  font-size: 12px;
+  line-height: 1.55;
+}

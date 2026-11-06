@@ -13,12 +13,21 @@ import { fileURLToPath } from "node:url";
  * imported by this entry, so none of that code exists in the
  * showcase bundle at all. The default build (vite.config.ts) is
  * untouched.
+ *
+ * Phase 9 (v17) adds a second entry: index-gate.html →
+ * src/gate-main.tsx → GateApp — the email-gate page the Pages
+ * middleware serves to visitors without a session cookie.
  */
 export default defineConfig({
   plugins: [react()],
   build: {
     rollupOptions: {
-      input: fileURLToPath(new URL("./index-showcase.html", import.meta.url)),
+      input: {
+        showcase: fileURLToPath(
+          new URL("./index-showcase.html", import.meta.url),
+        ),
+        gate: fileURLToPath(new URL("./index-gate.html", import.meta.url)),
+      },
     },
   },
 });

@@ -207,6 +207,9 @@ export function ShowcaseApp() {
   const [selected, setSelected] = useState<FleetEvent | null>(null);
   const [inspectName, setInspectName] = useState<string | null>(null);
   const [webglFailed, setWebglFailed] = useState(false);
+  /** Phase 9: snapshot answered 401 — the email gate wants this
+   *  visitor to register first (only happens behind Cloudflare). */
+  const [authRequired, setAuthRequired] = useState(false);
 
   const effectsRef = useRef<EffectEvent[]>([]);
   const statsRef = useRef<Map<string, BotStats>>(new Map());
@@ -229,6 +232,16 @@ export function ShowcaseApp() {
         const res = await fetch(`${SNAPSHOT_URL}${sep}t=${Date.now()}`, {
           cache: "no-store",
         });
+        if (res.status === 401) {
+          // Phase 9 — the email gate (Cloudflare middleware) requires
+          // a session before it will serve the snapshot. Send the
+          // visitor to the gate page; registration sets the cookie.
+          if (!cancelled) {
+            setAuthRequired(true);
+            window.location.assign("/gate.html");
+          }
+          return;
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as ShowcaseSnapshot;
         if (cancelled) return;
@@ -353,7 +366,13 @@ export function ShowcaseApp() {
         </div>
       </header>
 
-      {!snapshot && loadError && (
+      {!snapshot && authRequired && (
+        <p className="error">
+          This showcase is for registered viewers — taking you to the
+          gate…
+        </p>
+      )}
+      {!snapshot && !authRequired && loadError && (
         <p className="error">
           The latest snapshot could not be loaded ({loadError}). The page
           keeps retrying every minute.
