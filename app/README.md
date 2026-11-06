@@ -141,3 +141,5 @@ above it.
 | `BOTS_DIR` | engine, api | `../../bots` layout default |
 | `API_PORT` | api | `8080` |
 | `API_BASE_URL` | engine | `http://localhost:8080` |
+| `UI_URL` | api (CORS allowlist) | unset → reflect any origin (local dev); set to the dashboard's public origin for production |
+| `API_URL` | web (build time) | unset → same host as the page, port 8080; Compose passes it to the web build as `VITE_API_URL`, baked into the bundle — changing it requires a rebuild |

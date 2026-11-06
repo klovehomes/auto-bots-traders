@@ -114,8 +114,41 @@ export function describeControl(
   return `⛔ ${name} KILL + LIQUIDATE${liqText}`;
 }
 
-const API_BASE = `http://${window.location.hostname}:8080`;
-const EVENTS_URL = `ws://${window.location.hostname}:8080/events`;
+/**
+ * Dashboard → API addressing.
+ *
+ * Local default: the API sits on the same host as the page, port 8080,
+ * over the page's own protocol (http/ws on a laptop; https/wss if the
+ * page is ever served over TLS).
+ *
+ * Production (VPS): set API_URL in app/.env. Docker Compose passes it
+ * into the web image build as Vite's VITE_API_URL, so the value is
+ * baked into the static bundle at build time — changing API_URL means
+ * rebuilding the web image, not just restarting it. UI_URL in the same
+ * .env is the matching public dashboard origin; the API reads it as
+ * its CORS allowlist (see packages/api).
+ */
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+const configuredApiBase = trimTrailingSlash(
+  (import.meta.env.VITE_API_URL ?? "").trim(),
+);
+const pageProtocol = window.location.protocol === "https:" ? "https:" : "http:";
+const API_BASE =
+  configuredApiBase || `${pageProtocol}//${window.location.hostname}:8080`;
+
+function eventsUrlFor(apiBase: string): string {
+  const url = new URL(apiBase, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/events`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+const EVENTS_URL = eventsUrlFor(API_BASE);
 
 /**
  * Client-side stream retention (Phase 6) — mirrors the API's event

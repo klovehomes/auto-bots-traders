@@ -11,6 +11,10 @@ services:
       API_PORT: "8080"
       INTERNAL_EVENT_TOKEN: ${INTERNAL_EVENT_TOKEN:-dev-token}
       MODE: ${MODE:-sim}
+      # Production public dashboard origin (UI_URL in .env). When set,
+      # the API's CORS allowlist is exactly this origin; unset = local
+      # development behaviour (reflect any origin).
+      UI_URL: ${UI_URL:-}
       BOTS_DIR: /bots
       # Risk Gate control state (kill switch halts + audit log) lives on
       # a named volume so a halt survives container restarts/rebuilds.
@@ -76,6 +80,11 @@ services:
     build:
       context: .
       dockerfile: packages/web/Dockerfile
+      args:
+        # Production public API address (API_URL in .env). Vite bakes
+        # it into the static bundle at build time, so changing API_URL
+        # requires `docker compose up -d --build`, not a restart.
+        VITE_API_URL: ${API_URL:-}
     ports:
       - "4173:4173"
     depends_on:

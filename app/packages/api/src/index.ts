@@ -24,6 +24,13 @@ const INTERNAL_EVENT_TOKEN = process.env.INTERNAL_EVENT_TOKEN ?? "dev-token";
 /** Fleet run mode from this service's own MODE env (sim | paper | connected). */
 const MODE = parseFleetMode(process.env.MODE);
 /**
+ * Public dashboard origin (UI_URL in app/.env, e.g.
+ * https://traderbot.example.com). When set, CORS reflects only that
+ * origin — the production posture for a VPS behind TLS. When unset
+ * (local development), any origin is reflected, as before.
+ */
+const UI_URL = (process.env.UI_URL ?? "").trim().replace(/\/+$/, "");
+/**
  * Where the Risk Gate control state (halts + audit log) persists. A halt
  * must survive restarts, so this file lives on durable storage — in the
  * Docker build, a named volume (see docker-compose.yml).
@@ -54,7 +61,8 @@ const LIQUIDATION_WAIT_MS = 10_000;
 async function main(): Promise<void> {
   const app = Fastify({ logger: true });
 
-  await app.register(cors, { origin: true });
+  await app.register(cors, { origin: UI_URL ? [UI_URL] : true });
+  if (UI_URL) app.log.info(`CORS allowlist: ${UI_URL} (UI_URL)`);
   await app.register(websocket);
 
   // The API reads the same bot .md files as the engine (shared loader),
