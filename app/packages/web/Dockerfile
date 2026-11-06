@@ -19,8 +19,19 @@ COPY . .
 ARG VITE_API_URL=""
 ENV VITE_API_URL=$VITE_API_URL
 
+# Phase 8 — public showcase flavor. VITE_SHOWCASE=1 (set by the
+# Compose `showcase` service) builds the read-only entry instead
+# (index-showcase.html → ShowcaseApp): no kill switch, no mode
+# switch, no WebSocket — it polls a published snapshot file.
+# VITE_SNAPSHOT_URL overrides where that file is fetched from
+# (default: relative "snapshot.json" served beside the page).
+ARG VITE_SHOWCASE=""
+ARG VITE_SNAPSHOT_URL=""
+ENV VITE_SHOWCASE=$VITE_SHOWCASE
+ENV VITE_SNAPSHOT_URL=$VITE_SNAPSHOT_URL
+
 # Build the static frontend, then serve it with vite preview.
-RUN npm run build --workspace @fleet/web
+RUN if [ "$VITE_SHOWCASE" = "1" ]; then npm run build:showcase --workspace @fleet/web; else npm run build --workspace @fleet/web; fi
 EXPOSE 4173
 
 CMD ["npm", "--workspace", "@fleet/web", "run", "preview"]

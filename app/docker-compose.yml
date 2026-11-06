@@ -91,6 +91,26 @@ services:
       - api
     restart: unless-stopped
 
+  # Phase 8 — the public READ-ONLY showcase: the same web package
+  # built with VITE_SHOWCASE=1 (separate entry tree; the kill switch,
+  # mode switch and WebSocket code are never in this bundle). It has
+  # NO connection to the API — it polls a static snapshot.json that
+  # tools/publish-snapshot.mjs writes from the API's read endpoints.
+  # The sample snapshot baked into the image (packages/web/public/)
+  # serves until a published one is mounted/copied over it. Serve it
+  # only where the public may reach it; the `web` service above stays
+  # on the private network as always.
+  showcase:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+      args:
+        VITE_SHOWCASE: "1"
+        VITE_SNAPSHOT_URL: ${SNAPSHOT_URL:-}
+    ports:
+      - "4174:4173"
+    restart: unless-stopped
+
 volumes:
   # API-owned persistent state (kill-switch control state today).
   fleet-data:

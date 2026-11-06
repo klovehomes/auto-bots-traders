@@ -1,0 +1,331 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-06T07:16:10.264Z",
+  "fleetMode": "paper",
+  "bots": [
+    {
+      "codename": "trendia",
+      "displayName": "Trendia",
+      "color": "#22d3ee",
+      "mode": "paper",
+      "balance": 10000,
+      "dayPnL": 0,
+      "positions": []
+    },
+    {
+      "codename": "snapback",
+      "displayName": "Snapback",
+      "color": "#a78bfa",
+      "mode": "paper",
+      "balance": 9997.08,
+      "dayPnL": 0,
+      "positions": []
+    },
+    {
+      "codename": "vega",
+      "displayName": "Vega",
+      "color": "#f472b6",
+      "mode": "paper",
+      "balance": 10000,
+      "dayPnL": 0,
+      "positions": []
+    },
+    {
+      "codename": "wesley",
+      "displayName": "Wesley",
+      "color": "#4ade80",
+      "mode": "paper",
+      "balance": 10086,
+      "dayPnL": 86,
+      "positions": [
+        {
+          "symbol": "SOFI",
+          "qty": 100,
+          "side": "sell",
+          "avgEntry": 16.2
+        }
+      ]
+    },
+    {
+      "codename": "polycrypt9000",
+      "displayName": "PolyCrypt9000",
+      "color": "#fbbf24",
+      "mode": "paper + shadow",
+      "balance": 9976.25,
+      "dayPnL": -23.75,
+      "positions": []
+    }
+  ],
+  "recentTrades": [
+    {
+      "bot": "Wesley",
+      "type": "close",
+      "decision_id": "wes-sim-104",
+      "symbol": "F",
+      "side": "buy",
+      "qty": 100,
+      "price": 11.86,
+      "pnl": 86,
+      "reason": "SIM · Cash-secured put on F expired worthless — premium kept, wheel cycle complete.",
+      "ts": "2026-11-06T06:52:10.264Z"
+    },
+    {
+      "bot": "Wesley",
+      "type": "open",
+      "decision_id": "wes-sim-103",
+      "symbol": "SOFI",
+      "side": "sell",
+      "qty": 100,
+      "price": 16.2,
+      "pnl": null,
+      "reason": "SIM · Sold a cash-secured put on SOFI (weekly cycle) inside the $5–$55 income band.",
+      "ts": "2026-11-06T06:04:10.264Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "close",
+      "decision_id": "poly-sim-87",
+      "symbol": "BTC/USD",
+      "side": "sell",
+      "qty": 0.05,
+      "price": 102450,
+      "pnl": -23.75,
+      "reason": "SIM · BTC/USD breakout faded back through the entry — breakout rule exits at the stop.",
+      "ts": "2026-11-06T05:10:10.264Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-86",
+      "symbol": "BTC/USD",
+      "side": "buy",
+      "qty": 0.05,
+      "price": 103120,
+      "pnl": null,
+      "reason": "SIM · BTC/USD cleared the 24h range high on rising volume — breakout entry.",
+      "ts": "2026-11-06T01:46:10.264Z"
+    },
+    {
+      "bot": "Wesley",
+      "type": "open",
+      "decision_id": "wes-sim-102",
+      "symbol": "F",
+      "side": "sell",
+      "qty": 100,
+      "price": 12.72,
+      "pnl": null,
+      "reason": "SIM · Sold a cash-secured put on F — 100-share wheel block, premium collected up front.",
+      "ts": "2026-11-05T05:16:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "close",
+      "decision_id": "snap-20261104-2c",
+      "symbol": "TSLA",
+      "side": "sell",
+      "qty": 5,
+      "price": 388.18,
+      "pnl": -1.8,
+      "reason": "Exit at the 20-day mean ($382.84 band reached intraday) — position closed per the mean-reversion exit rule.",
+      "ts": "2026-11-05T02:04:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "open",
+      "decision_id": "snap-20261104-2o",
+      "symbol": "TSLA",
+      "side": "buy",
+      "qty": 5,
+      "price": 388.54,
+      "pnl": null,
+      "reason": "Mean-reversion stretch: RSI(2) 9.6 < 10 with TSLA above its 20-day mean ($382.84); 200DMA trend filter passed.",
+      "ts": "2026-11-05T01:52:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "close",
+      "decision_id": "snap-20261104-1c",
+      "symbol": "TSLA",
+      "side": "sell",
+      "qty": 5,
+      "price": 388.81,
+      "pnl": -1.12,
+      "reason": "Exit at the 20-day mean ($382.84 band reached intraday) — position closed per the mean-reversion exit rule.",
+      "ts": "2026-11-05T01:10:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "open",
+      "decision_id": "snap-20261104-1o",
+      "symbol": "TSLA",
+      "side": "buy",
+      "qty": 5,
+      "price": 389.03,
+      "pnl": null,
+      "reason": "Mean-reversion stretch: RSI(2) 10.0 at the < 10 trigger band with TSLA above its 20-day mean ($382.84); 200DMA trend filter passed.",
+      "ts": "2026-11-05T00:58:10.264Z"
+    }
+  ],
+  "recentDecisions": [
+    {
+      "bot": "Wesley",
+      "type": "close",
+      "decision_id": "wes-sim-104",
+      "symbol": "F",
+      "side": "buy",
+      "qty": 100,
+      "price": 11.86,
+      "pnl": 86,
+      "reason": "SIM · Cash-secured put on F expired worthless — premium kept, wheel cycle complete.",
+      "ts": "2026-11-06T06:52:10.264Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "signal",
+      "decision_id": "poly-sim-88",
+      "symbol": "ETH/USD",
+      "side": null,
+      "qty": null,
+      "price": null,
+      "pnl": null,
+      "reason": "SIM · ETH/USD +1.8% over 4h — below the 3% breakout trigger. No trade.",
+      "ts": "2026-11-06T06:34:10.264Z"
+    },
+    {
+      "bot": "Wesley",
+      "type": "open",
+      "decision_id": "wes-sim-103",
+      "symbol": "SOFI",
+      "side": "sell",
+      "qty": 100,
+      "price": 16.2,
+      "pnl": null,
+      "reason": "SIM · Sold a cash-secured put on SOFI (weekly cycle) inside the $5–$55 income band.",
+      "ts": "2026-11-06T06:04:10.264Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "close",
+      "decision_id": "poly-sim-87",
+      "symbol": "BTC/USD",
+      "side": "sell",
+      "qty": 0.05,
+      "price": 102450,
+      "pnl": -23.75,
+      "reason": "SIM · BTC/USD breakout faded back through the entry — breakout rule exits at the stop.",
+      "ts": "2026-11-06T05:10:10.264Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-86",
+      "symbol": "BTC/USD",
+      "side": "buy",
+      "qty": 0.05,
+      "price": 103120,
+      "pnl": null,
+      "reason": "SIM · BTC/USD cleared the 24h range high on rising volume — breakout entry.",
+      "ts": "2026-11-06T01:46:10.264Z"
+    },
+    {
+      "bot": "Wesley",
+      "type": "open",
+      "decision_id": "wes-sim-102",
+      "symbol": "F",
+      "side": "sell",
+      "qty": 100,
+      "price": 12.72,
+      "pnl": null,
+      "reason": "SIM · Sold a cash-secured put on F — 100-share wheel block, premium collected up front.",
+      "ts": "2026-11-05T05:16:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "close",
+      "decision_id": "snap-20261104-2c",
+      "symbol": "TSLA",
+      "side": "sell",
+      "qty": 5,
+      "price": 388.18,
+      "pnl": -1.8,
+      "reason": "Exit at the 20-day mean ($382.84 band reached intraday) — position closed per the mean-reversion exit rule.",
+      "ts": "2026-11-05T02:04:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "open",
+      "decision_id": "snap-20261104-2o",
+      "symbol": "TSLA",
+      "side": "buy",
+      "qty": 5,
+      "price": 388.54,
+      "pnl": null,
+      "reason": "Mean-reversion stretch: RSI(2) 9.6 < 10 with TSLA above its 20-day mean ($382.84); 200DMA trend filter passed.",
+      "ts": "2026-11-05T01:52:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "close",
+      "decision_id": "snap-20261104-1c",
+      "symbol": "TSLA",
+      "side": "sell",
+      "qty": 5,
+      "price": 388.81,
+      "pnl": -1.12,
+      "reason": "Exit at the 20-day mean ($382.84 band reached intraday) — position closed per the mean-reversion exit rule.",
+      "ts": "2026-11-05T01:10:10.264Z"
+    },
+    {
+      "bot": "Snapback",
+      "type": "open",
+      "decision_id": "snap-20261104-1o",
+      "symbol": "TSLA",
+      "side": "buy",
+      "qty": 5,
+      "price": 389.03,
+      "pnl": null,
+      "reason": "Mean-reversion stretch: RSI(2) 10.0 at the < 10 trigger band with TSLA above its 20-day mean ($382.84); 200DMA trend filter passed.",
+      "ts": "2026-11-05T00:58:10.264Z"
+    },
+    {
+      "bot": "Vega",
+      "type": "signal",
+      "decision_id": "vega-20261104-7",
+      "symbol": "SMCI",
+      "side": null,
+      "qty": null,
+      "price": null,
+      "pnl": null,
+      "reason": "NO TRADE · Options chain fetch failed for SMCI (broker returned 404) — signal recorded, no contract picked. Nothing bought.",
+      "ts": "2026-11-05T00:16:10.264Z"
+    },
+    {
+      "bot": "Vega",
+      "type": "signal",
+      "decision_id": "vega-20261104-5",
+      "symbol": "RBLX",
+      "side": null,
+      "qty": null,
+      "price": null,
+      "pnl": null,
+      "reason": "NO TRADE · Options chain fetch failed for RBLX (broker returned 404) — signal recorded, no contract picked. Nothing bought.",
+      "ts": "2026-11-04T23:16:10.264Z"
+    },
+    {
+      "bot": "Trendia",
+      "type": "signal",
+      "decision_id": "trendia-20261104-eod",
+      "symbol": null,
+      "side": null,
+      "qty": null,
+      "price": null,
+      "pnl": null,
+      "reason": "Daily evaluation: 23-name universe screened — no name satisfied breakout + RSI(55–80) + trend + SPY-regime together. No trade.",
+      "ts": "2026-11-04T22:16:10.264Z"
+    }
+  ],
+  "totals": {
+    "equity": 50059.33,
+    "dayPnL": 62.25
+  }
+}

@@ -1141,3 +1141,76 @@ body {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+/* ── Phase 8: public read-only showcase ─────────────────────────────
+   Used only by src/showcase.tsx (the private dashboard never renders
+   these classes). The banner is the persistent "you cannot control
+   anything here" signal; the footer carries the paper-trading
+   disclaimer. */
+.showcase-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  text-align: center;
+  padding: 10px 16px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(251, 191, 36, 0.55);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(251, 191, 36, 0.16), rgba(251, 191, 36, 0.05));
+  color: #f5d67b;
+}
+.showcase-banner strong {
+  letter-spacing: 0.08em;
+  font-size: 14px;
+}
+.showcase-banner span {
+  font-size: 12.5px;
+  color: #cbb26a;
+}
+.snapshot-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(139, 152, 169, 0.4);
+  color: #8b98a9;
+  font-size: 12px;
+}
+.snapshot-pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3fb950;
+  display: inline-block;
+}
+.showcase-footer {
+  margin-top: 22px;
+  padding: 14px 8px 4px;
+  border-top: 1px solid rgba(139, 152, 169, 0.25);
+  text-align: center;
+}
+.showcase-disclaimer {
+  color: #e6edf3;
+  font-size: 13.5px;
+  margin: 0 0 4px;
+}
+.showcase-foot-meta {
+  color: #8b98a9;
+  font-size: 12px;
+  margin: 0;
+}
+.ro-heading {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #8b98a9;
+}
+.ro-holding {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+}
