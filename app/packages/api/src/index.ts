@@ -93,8 +93,12 @@ async function main(): Promise<void> {
   // the Decisions tab shows the full day — not just whatever streamed
   // while a tab happened to be open.
   const historyStore = new EventHistoryStore(EVENT_HISTORY_PATH);
+  const historyCounts = historyStore.counts;
   app.log.info(
-    `event history: ${EVENT_HISTORY_PATH} (${historyStore.size} retained events, latest seq ${historyStore.latestSeq()})`,
+    `event history: ${EVENT_HISTORY_PATH} (${historyCounts.total} retained events — ` +
+      `${historyCounts.protectedDecisions} protected decisions / ` +
+      `${historyCounts.simDecisions} sim decisions / ${historyCounts.other} other; ` +
+      `latest seq ${historyStore.latestSeq()})`,
   );
   app.addHook("onClose", async () => {
     historyStore.close();
