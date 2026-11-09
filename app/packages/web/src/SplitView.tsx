@@ -10,6 +10,7 @@ import type {
   ScanDefinition,
   ScanResultsResponse,
   SleeveToggles,
+  UserSelectionValuation,
   UserSelectionsResponse,
 } from "@fleet/shared/types";
 import { fmtMoney, fmtTime, type BotStats } from "./fleetState.js";
@@ -30,6 +31,12 @@ import { fmtMoney, fmtTime, type BotStats } from "./fleetState.js";
  * ONE shared pool under both sides (Keith, 2026-11-08):
  * remaining = totalFunds − botAllocation − Σ open user selections.
  * Both panels read the same GET /allocations state.
+ *
+ * Phase PM5: when NO scan is selected, the left panel's results area
+ * is the home for the user's current selections/holdings (the same
+ * re-priced book the “Your Selections” tab below shows). Selecting a
+ * scan swaps the area to that scan; clicking the active scan chip
+ * again deselects it and returns to the holdings view.
  */
 
 const SLEEVES: { key: keyof SleeveToggles; label: string; hint: string }[] = [
@@ -81,6 +88,9 @@ function ScanPanel({ apiBase, alloc, onBooked }: ScanPanelProps) {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitNote, setSubmitNote] = useState<string | null>(null);
+  /** Phase PM5: bumped to re-price the holdings view (the no-scan
+   * state) after a Submit books new selections. */
+  const [holdingsKey, setHoldingsKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -123,6 +133,20 @@ function ScanPanel({ apiBase, alloc, onBooked }: ScanPanelProps) {
     },
     [apiBase],
   );
+
+  /** Phase PM5: clicking the active scan chip again deselects the
+   * scan — the panel returns to the Your Selections holdings view,
+   * re-priced on the way back in. */
+  const deselectScan = useCallback(() => {
+    setActiveScan(null);
+    setData(null);
+    setChecked({});
+    setSubmitError(null);
+    setSubmitNote(null);
+    setLoadError(null);
+    setLoading(false);
+    setHoldingsKey((k) => k + 1);
+  }, []);
 
   function toggleRow(marketId: string, on: boolean): void {
     setChecked((prev) => {
@@ -176,6 +200,10 @@ function ScanPanel({ apiBase, alloc, onBooked }: ScanPanelProps) {
       setSubmitNote(
         `Booked ${body.booked?.length ?? items.length} selection${items.length === 1 ? "" : "s"} — track them in the “Your Selections” tab below.`,
       );
+      // The user stays on the scan results (PM5), but the holdings
+      // view's data just changed — bump its key so it re-prices
+      // fresh when they click back to it.
+      setHoldingsKey((k) => k + 1);
       onBooked();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Submit failed.");
@@ -192,13 +220,30 @@ function ScanPanel({ apiBase, alloc, onBooked }: ScanPanelProps) {
   return (
     <div className="split-panel">
       <h2 className="split-title">Market Scans</h2>
+      {/* Phase PM5 (Keith's addendum): the explicit way back to the
+          holdings view — deselects any active scan. The chip-toggle
+          (clicking the active scan again) does the same thing. */}
+      <button
+        type="button"
+        className={activeScan === null ? "holdings-btn active" : "holdings-btn"}
+        onClick={deselectScan}
+        aria-pressed={activeScan === null}
+      >
+        Show current holdings
+      </button>
       <div className="scan-buttons" role="tablist" aria-label="Polymarket scans">
         {scans.map((s, i) => (
           <button
             key={s.id}
             className={activeScan === s.id ? "tab small active" : "tab small"}
-            onClick={() => loadScan(s.id)}
-            title={s.description}
+            onClick={() =>
+              activeScan === s.id ? deselectScan() : loadScan(s.id)
+            }
+            title={
+              activeScan === s.id
+                ? `${s.description} — click again to return to your holdings`
+                : s.description
+            }
           >
             {i + 1}. {s.label}
           </button>
@@ -206,11 +251,10 @@ function ScanPanel({ apiBase, alloc, onBooked }: ScanPanelProps) {
       </div>
 
       {loadError && <p className="error">{loadError}</p>}
-      {!activeScan && !loadError && (
-        <p className="empty">
-          Select a scan — its markets pull up here, live from Polymarket.
-          Check the ones you want, enter an amount for each, then Submit.
-        </p>
+      {/* Phase PM5: no scan selected → the area is home to the user's
+          current holdings (same re-priced book as the tab below). */}
+      {!activeScan && (
+        <SelectionsHoldings apiBase={apiBase} refreshKey={holdingsKey} />
       )}
       {loading && (
         <div className="scan-loading" role="status" aria-live="polite">
@@ -540,16 +584,16 @@ export function SplitView({ apiBase, stats, landscape, onBooked }: SplitViewProp
 
 // ------------------------------------------------------- your selections ---
 
-export function YourSelectionsTab({
-  apiBase,
-  refreshKey,
-}: {
-  apiBase: string;
-  refreshKey: number;
-}) {
+/**
+ * The ONE data path for the user's selections book — shared by the
+ * bottom “Your Selections” tab and (Phase PM5) the Market Scans
+ * panel's no-scan holdings view. GET /user-selections returns each
+ * booked selection re-priced live from Polymarket (currentPrice,
+ * currentValue, pnl) plus totals; both surfaces render exactly that.
+ */
+function useUserSelections(apiBase: string, refreshKey: number) {
   const [data, setData] = useState<UserSelectionsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const reloadCount = useRef(0);
 
   const load = useCallback(() => {
     fetch(`${apiBase}/user-selections`)
@@ -570,6 +614,113 @@ export function YourSelectionsTab({
     load();
   }, [load, refreshKey]);
 
+  return { data, error, load };
+}
+
+/** The per-holding detail line (outcome, entry → current, status). */
+function SelectionSubLine({ s }: { s: UserSelectionValuation }) {
+  return (
+    <span className="scan-sub">
+      {s.outcome} · via {s.scanLabel} · {fmtMoney(s.amount)} @{" "}
+      {fmtCents(s.priceAtSelection)} → now {fmtCents(s.currentPrice)}{" "}
+      · {s.status}
+    </span>
+  );
+}
+
+/** Current value + P&L badge for one holding. */
+function SelectionValueBadge({ s }: { s: UserSelectionValuation }) {
+  return (
+    <span className="selection-value">
+      {fmtMoney(s.currentValue)}{" "}
+      <span className={s.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>
+        ({fmtMoney(s.pnl, true)})
+      </span>
+    </span>
+  );
+}
+
+/** The shared totals line (allocated / current value / net P&L). */
+function SelectionsTotalsText({ data }: { data: UserSelectionsResponse }) {
+  return (
+    <>
+      Totals: allocated <strong>{fmtMoney(data.totals.totalAllocated)}</strong>{" "}
+      · current value <strong>{fmtMoney(data.totals.totalCurrentValue)}</strong>{" "}
+      · P&amp;L{" "}
+      <strong className={data.totals.totalPnl >= 0 ? "pnl-pos" : "pnl-neg"}>
+        {fmtMoney(data.totals.totalPnl, true)}
+      </strong>
+    </>
+  );
+}
+
+/**
+ * Phase PM5 — the Market Scans panel's default (no scan selected)
+ * view: the user's current selections/holdings, at a glance, without
+ * scrolling to the bottom tab. Same endpoint, same re-pricing, same
+ * totals as YourSelectionsTab. It mounts (and therefore re-prices)
+ * on panel load, on return via chip-deselect, and after a Submit
+ * (the panel bumps refreshKey).
+ */
+function SelectionsHoldings({
+  apiBase,
+  refreshKey,
+}: {
+  apiBase: string;
+  refreshKey: number;
+}) {
+  const { data, error } = useUserSelections(apiBase, refreshKey);
+
+  return (
+    <div className="holdings-view">
+      <h3 className="split-subtitle">Your Selections — current holdings</h3>
+      {error && (
+        <p className="error">Could not load your selections: {error}</p>
+      )}
+      {!data && !error && <p className="empty">Loading your selections…</p>}
+      {data && data.selections.length === 0 && (
+        <p className="empty">
+          No selections yet — pick a scan above, check some markets, and Submit.
+        </p>
+      )}
+      {data && data.selections.length > 0 && (
+        <>
+          <ul className="scan-list">
+            {data.selections.map((s) => (
+              <li key={s.id} className="scan-row">
+                <span className="scan-main">
+                  <strong>{s.question}</strong>
+                  <SelectionSubLine s={s} />
+                </span>
+                <SelectionValueBadge s={s} />
+              </li>
+            ))}
+          </ul>
+          <p className="scan-meta selections-totals">
+            <SelectionsTotalsText data={data} />
+          </p>
+        </>
+      )}
+      <p className="hint">
+        Your booked selections, re-priced live from Polymarket — the
+        same book as the “Your Selections” tab below. Pick a scan
+        above to browse markets; click the active scan again to come
+        back here.
+      </p>
+    </div>
+  );
+}
+
+export function YourSelectionsTab({
+  apiBase,
+  refreshKey,
+}: {
+  apiBase: string;
+  refreshKey: number;
+}) {
+  const { data, error, load } = useUserSelections(apiBase, refreshKey);
+  const reloadCount = useRef(0);
+
   if (error) return <p className="error">Could not load your selections: {error}</p>;
   if (!data) return <p className="empty">Loading your selections…</p>;
   if (data.selections.length === 0) {
@@ -589,28 +740,14 @@ export function YourSelectionsTab({
           <li key={s.id} className="event selection-row">
             <span className="event-main">
               <strong>{s.question}</strong>
-              <span className="scan-sub">
-                {s.outcome} · via {s.scanLabel} · {fmtMoney(s.amount)} @{" "}
-                {fmtCents(s.priceAtSelection)} → now {fmtCents(s.currentPrice)}{" "}
-                · {s.status}
-              </span>
+              <SelectionSubLine s={s} />
             </span>
-            <span className="selection-value">
-              {fmtMoney(s.currentValue)}{" "}
-              <span className={s.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>
-                ({fmtMoney(s.pnl, true)})
-              </span>
-            </span>
+            <SelectionValueBadge s={s} />
           </li>
         ))}
       </ul>
       <p className="scan-meta selections-totals">
-        Totals: allocated <strong>{fmtMoney(data.totals.totalAllocated)}</strong>{" "}
-        · current value <strong>{fmtMoney(data.totals.totalCurrentValue)}</strong>{" "}
-        · P&amp;L{" "}
-        <strong className={data.totals.totalPnl >= 0 ? "pnl-pos" : "pnl-neg"}>
-          {fmtMoney(data.totals.totalPnl, true)}
-        </strong>
+        <SelectionsTotalsText data={data} />
         <button
           className="info-btn"
           onClick={() => {

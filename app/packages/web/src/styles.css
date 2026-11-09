@@ -1371,6 +1371,12 @@ body {
   color: #8b98a9;
 }
 
+/* Phase PM5: the Market Scans panel's no-scan holdings view sits
+   directly under the scan chips — tighten its header spacing. */
+.holdings-view .split-subtitle {
+  margin-top: 4px;
+}
+
 /* Phase PM4: the landscape inside the Bot Trades column — same
    .landscape-wrap frame as the old full-width view, sized to fit a
    half-width column with a bounded, responsive height. */
@@ -1465,6 +1471,32 @@ body {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 10px;
+}
+
+/* Phase PM5: "Show current holdings" — a full-width button above the
+   scan chips; its active state mirrors the active scan chip. */
+.holdings-btn {
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 7px 14px;
+  border: 1px solid #22304a;
+  border-radius: 999px;
+  background: rgba(9, 14, 26, 0.6);
+  color: #aeb9c6;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.holdings-btn:hover {
+  color: #e6edf3;
+}
+
+.holdings-btn.active {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: #fff;
 }
 
 .scan-meta {
