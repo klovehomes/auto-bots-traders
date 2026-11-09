@@ -104,9 +104,9 @@ export function describeControl(
             ? ` · ${liq.failed.length} could not be closed`
             : "");
   if (entry.scope === "fleet") {
-    if (entry.action === "kill") return "⛔⛔ TEAM KILL — all bots halted";
-    if (entry.action === "resume") return "▶▶ TEAM RESUMED — all bots trading";
-    return `⛔⛔ TEAM KILL + LIQUIDATE${liqText}`;
+    if (entry.action === "kill") return "⛔⛔ KILL — PolyCrypt9000 halted";
+    if (entry.action === "resume") return "▶▶ RESUMED — PolyCrypt9000 trading";
+    return `⛔⛔ KILL + LIQUIDATE — PolyCrypt9000${liqText}`;
   }
   const name = entry.target ? nameFor(entry.target) : "Bot";
   if (entry.action === "kill") return `⛔ ${name} KILLED — trading halted`;
@@ -648,9 +648,9 @@ export function App() {
     <main className="page">
       <header className="header">
         <div>
-          <h1>Trader Bot Landscape</h1>
+          <h1>Prediction Markets Assistant</h1>
           <p className="subtitle">
-            Five bots, one valley — live paper-trading visualization.
+            Polymarket-only trader — Polymarket shadow sleeve + BTC / ETH / SOL breakout sleeve.
           </p>
         </div>
         <div className="header-badges">
@@ -671,7 +671,7 @@ export function App() {
           <div className="mode-switch">
             <div className="mode-switch-row">
               <label className="mode-switch-label" htmlFor="fleet-mode-select">
-                Fleet mode
+                Run mode
               </label>
               <select
                 id="fleet-mode-select"
@@ -776,11 +776,9 @@ export function App() {
           <span className="control-state">
             {control === null
               ? "state unavailable"
-              : control.allHalted
-                ? "ALL BOTS HALTED"
-                : control.anyHalted
-                  ? `${haltedNames.size} of ${bots.length} bots halted`
-                  : "all bots active"}
+              : control.anyHalted
+                ? "PolyCrypt9000 halted"
+                : "PolyCrypt9000 active"}
           </span>
         </div>
         <div className="control-arm">
@@ -831,7 +829,7 @@ export function App() {
         <div className="halt-banner" role="alert">
           ⛔{" "}
           {control.allHalted
-            ? "ALL BOTS HALTED — no bot is trading."
+            ? "POLYCRYPT9000 HALTED — PolyCrypt9000 is not trading."
             : `Halted: ${[...haltedNames].join(", ")}.`}{" "}
           Halts persist across restarts until deliberately resumed.
         </div>

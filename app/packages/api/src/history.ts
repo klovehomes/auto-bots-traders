@@ -253,7 +253,9 @@ export class EventHistoryStore {
         return report;
       }
 
-      throw new Error(`unsupported version ${String(parsed.version)}`);
+      throw new Error(
+        `unsupported version ${String((parsed as { version: unknown }).version)}`,
+      );
     } catch (err) {
       // A corrupt history file must never wedge the API: start with
       // an empty history and say so loudly (same rule as ModeStore).

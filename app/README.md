@@ -1,10 +1,13 @@
 # Trader Bots — App
 
-TypeScript monorepo (npm workspaces) for Keith's five-bot trader team.
-This is the **Phase 0 scaffold** from `../PLAN.md`: the bot `.md` loader,
-the event bus, an Alpaca connection check, and a placeholder landscape
-page — packaged for Docker Compose from day one. No real trading yet;
-everything runs in paper/shadow mode as the phases land.
+TypeScript monorepo (npm workspaces) for Keith's Polymarket-only
+single-bot app — PolyCrypt9000 only (branch `pplymarket-only`). This is
+the app cut down to that one bot: its Polymarket mispricing shadow
+sleeve plus its BTC/ETH/SOL crypto breakout sleeve, 50/50 under one
+risk cap. It retains the bot `.md` loader, the event bus, an Alpaca
+connection check, and the landscape page — packaged for Docker Compose
+from day one. No real trading yet; everything runs in paper/shadow
+mode as the phases land.
 
 ## Layout
 
@@ -69,7 +72,7 @@ Sanity checks once running:
 
 ```bash
 curl http://localhost:8080/health   # {"ok":true}
-curl http://localhost:8080/bots     # the five bot configs as JSON
+curl http://localhost:8080/bots     # the one bot config as JSON
 ```
 
 ## Run it with Docker Compose
@@ -97,12 +100,12 @@ The engine only attempts an Alpaca connection when **both**
 
 …and keeps running. That is the expected state until the Alpaca paper
 account exists. Keys go in `.env` (gitignored) — never in the bot `.md`
-files, never in git. `ALPACA_PAPER` defaults to `true`; the team stays
-in paper/shadow mode until a per-bot live gate is approved (see PLAN.md).
+files, never in git. `ALPACA_PAPER` defaults to `true`; the bot stays
+in paper/shadow mode until a live gate is approved (see PLAN.md).
 
 ## Run modes (MODE)
 
-The team has three run modes. The `MODE` env var (default `sim`) is
+The app has three run modes. The `MODE` env var (default `sim`) is
 only the *initial* default: since Phase 5 the dashboard has a mode
 switch (upper right, under the status indicator) whose choice the API
 persists to `MODE_STATE_PATH` on the data volume — and a stored choice
@@ -111,19 +114,22 @@ engine exit and Docker's restart policy relaunches it into the new
 mode; the boot log says where the mode came from (`(source: dashboard
 switch)` vs `(source: env)`). The switch offers `sim` and `paper`;
 **Live cash account is listed but locked** — going live stays a
-per-bot, deliberate step, never a dropdown flip. The team MODE is the
-ceiling: a bot file's own `mode` can hold that bot below it, never
+per-bot, deliberate step, never a dropdown flip. The MODE is the
+ceiling: the bot file's own `mode` can hold the bot below it, never
 above it.
 
 - **`sim`** — synthetic market, no broker. A seeded random-walk price
-  book, a small position book per bot with $5,000 of sim equity each, and
-  opens/closes in each bot's own voice flowing through the normal event
+  book, a small position book for the bot with $10,000 of sim equity, and
+  opens/closes in the bot's own voice flowing through the normal event
   pipeline. The web page shows a **SIMULATED DATA** badge (from the
   engine's reported running mode, `GET /mode`). This is the mode for
   running the stack on a laptop under WSL + Docker — see
   `../LOCAL-RUN.md`.
 - **`paper`** — Alpaca paper account: the stub-aware connection check
-  (plus the Phase 0 test emitter until real strategy workers land).
+  runs, then PolyCrypt9000 runs on the simulator until its shadow/crypto
+  runners land. Polymarket has no paper/testnet, so its Polymarket
+  sleeve is shadow-by-design; its crypto sleeve will use the Alpaca
+  paper account once that runner is built.
 - **`connected`** — live accounts. **Not implemented in this build**: the
   engine logs that live trading is not enabled and runs paper-check
   behavior only. The config shape and the guardrail exist now so the

@@ -4,15 +4,12 @@ import type { BotConfig } from "@fleet/shared/types";
 /**
  * Bot avatars: defaults, the picker library, and per-bot choices.
  *
- * - DEFAULT_AVATARS maps each built-in bot's codename to its approved
- *   portrait (served from `packages/web/public/avatars/`). Per Keith's
- *   direction (2026-11-01), the DEFAULTS for Snapback and Vega are
- *   swapped: Snapback defaults to the Vega portrait file and Vega to
- *   the Snapback portrait file. The files themselves keep their names,
- *   and the picker library still lists each portrait under its own bot.
- * - AVATAR_LIBRARY is every avatar the picker offers: the five portraits
- *   plus the "Robot set" in `public/avatars/library/` (Keith's Astro-style
- *   grid crops + generated companions). See AVATARS.md at the app root.
+ * - DEFAULT_AVATARS maps the bot's codename to its approved
+ *   portrait (served from `packages/web/public/avatars/`).
+ * - AVATAR_LIBRARY is every avatar the picker offers: the PolyCrypt9000
+ *   portrait plus the "Robot set" in `public/avatars/library/` (Keith's
+ *   Astro-style grid crops + generated companions). See AVATARS.md at
+ *   the app root.
  * - A user's pick is stored per bot in localStorage under
  *   `fleet-avatar-<codename>` (the library entry id) and broadcast with
  *   the AVATAR_CHOICE_EVENT window event so the leaderboard, trade
@@ -22,13 +19,6 @@ import type { BotConfig } from "@fleet/shared/types";
  * bot whose image fails to load — fall back to the colored letter disc.
  */
 export const DEFAULT_AVATARS: Record<string, string> = {
-  wesley: "/avatars/wesley.webp",
-  trendia: "/avatars/trendia.webp",
-  // Keith's direction (2026-11-01): Snapback and Vega wear each other's
-  // portraits as their defaults. Files are NOT renamed — only this
-  // per-bot default resolution is swapped.
-  snapback: "/avatars/vega.webp",
-  vega: "/avatars/snapback.webp",
   polycrypt9000: "/avatars/polycrypt9000.webp",
 };
 
@@ -59,8 +49,7 @@ export interface AvatarChoice {
 }
 
 // Library portraits follow the FILES on purpose: each entry serves the
-// portrait file named after its own bot, independent of DEFAULT_AVATARS
-// (which Keith had swapped for Snapback/Vega — see above).
+// portrait file named after its own bot, independent of DEFAULT_AVATARS.
 const portrait = (file: string, label: string): AvatarChoice => ({
   id: `portrait-${file}`,
   label,
@@ -76,10 +65,6 @@ const astro = (file: string, label: string): AvatarChoice => ({
 });
 
 export const AVATAR_LIBRARY: AvatarChoice[] = [
-  portrait("wesley", "Portrait — Wesley"),
-  portrait("trendia", "Portrait — Trendia"),
-  portrait("snapback", "Portrait — Snapback"),
-  portrait("vega", "Portrait — Vega"),
   portrait("polycrypt9000", "Portrait — PolyCrypt9000"),
   astro("astro-1", "Astro · Spiky Hair"),
   astro("astro-2", "Astro · Classic"),
@@ -90,10 +75,6 @@ export const AVATAR_LIBRARY: AvatarChoice[] = [
   astro("astro-7", "Astro · Astronaut"),
   astro("astro-8", "Astro · Racer"),
   astro("astro-9", "Astro · Hooded"),
-  astro("astro-trendia", "Astro · Headset"),
-  astro("astro-snapback", "Astro · Backwards Cap"),
-  astro("astro-vega", "Astro · Star Shades"),
-  astro("astro-wesley", "Astro · Bow Tie"),
   astro("astro-polycrypt", "Astro · Gold Antenna"),
   astro("astro-eth", "Astro · Ethereum"),
 ];

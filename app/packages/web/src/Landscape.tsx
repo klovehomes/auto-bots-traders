@@ -112,7 +112,7 @@ export function cappedHeightsForEquities(equities: number[]): number[] {
 
 /**
  * Standing framing rule (Keith, 2026-11-06): the camera frames ~25%
- * closer than the original shot so the five towers fill more of the
+ * closer than the original shot so the tower fills more of the
  * screen, on desktop and phone alike. A 1.25× zoom = camera distance
  * × 1/1.25 = × 0.8 from the look-at point; the render loop applies it
  * by pulling the drifted camera position toward its target. Tunable.

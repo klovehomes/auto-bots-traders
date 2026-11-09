@@ -49,21 +49,6 @@ services:
       ALPACA_API_KEY: ${ALPACA_API_KEY:-}
       ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
       ALPACA_PAPER: ${ALPACA_PAPER:-true}
-      # Phase 1 paper-trader state (Trendia's peaks, entries, pending
-      # orders, realized PnL) persists on the shared data volume so a
-      # restart reconciles instead of forgetting open positions.
-      PAPER_STATE_PATH: /data/paper-trendia-state.json
-      # Phase 3 (Vega): SHADOW mode is the delivered default — his full
-      # options pipeline runs and logs decision/order-intent events but
-      # places NO broker orders. Set VEGA_SHADOW=false in .env to flip
-      # him to live paper orders (Keith's word only).
-      VEGA_SHADOW: ${VEGA_SHADOW:-true}
-      # Vega's state (tracked contracts, realized PnL, earnings map,
-      # IV history) persists on the same shared data volume.
-      VEGA_STATE_PATH: /data/paper-vega-state.json
-      # Phase 4 (Snapback): her state (tracked positions, pending
-      # orders, realized PnL) persists on the same shared data volume.
-      SNAPBACK_STATE_PATH: /data/paper-snapback-state.json
       # Phase 5: the stored dashboard mode choice (written by the API,
       # see MODE_STATE_PATH on the api service). Read at boot; when the
       # dashboard flips the switch, this engine exits and the restart
