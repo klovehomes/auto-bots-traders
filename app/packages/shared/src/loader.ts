@@ -65,13 +65,28 @@ export function loadBotFile(filePath: string): BotConfig {
 }
 
 /**
- * Load every bot in a directory. Only top-level `*.md` files are read —
- * subfolders (e.g. `bots/retired/`) are never recursed into.
+ * POLYMARKET-ONLY VARIANT (branch `polymarket-only`, Keith's call
+ * 2026-11-08): this build is a single-bot app. No matter which bot
+ * files sit in the bots directory, only PolyCrypt9000 is ever loaded —
+ * by the engine, by the API's GET /bots, and by the Risk Gate control
+ * store, which all share this loader. The other bots' files may still
+ * exist on this branch (inherited from `dev`; the GitHub snapshot
+ * push route cannot delete files), but they are inert: filtered out
+ * here, so they are never listed, never controlled, never traded.
+ */
+export const ONLY_BOT_CODENAME = "polycrypt9000";
+
+/**
+ * Load the bot(s) in a directory. Only top-level `*.md` files are
+ * read — subfolders (e.g. `bots/retired/`) are never recursed into —
+ * and on this variant the result is filtered to ONLY_BOT_CODENAME.
  */
 export function loadBots(dir: string = resolveBotsDir()): BotConfig[] {
   const files = readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
     .map((entry) => entry.name)
     .sort();
-  return files.map((name) => loadBotFile(join(dir, name)));
+  return files
+    .map((name) => loadBotFile(join(dir, name)))
+    .filter((bot) => bot.codename === ONLY_BOT_CODENAME);
 }
