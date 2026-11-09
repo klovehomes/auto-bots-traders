@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type {
   AllocationState,
   ScanDefinition,
@@ -6,7 +12,6 @@ import type {
   SleeveToggles,
   UserSelectionsResponse,
 } from "@fleet/shared/types";
-import type { FleetEvent } from "@fleet/shared/types";
 import { fmtMoney, fmtTime, type BotStats } from "./fleetState.js";
 
 /**
@@ -18,9 +23,9 @@ import { fmtMoney, fmtTime, type BotStats } from "./fleetState.js";
  * typing alone executes nothing.
  *
  * RIGHT: "Bot Trades" — the bot's carved-out portion of the shared
- * pool, the three sleeve toggles, and PolyCrypt9000's trading
- * activity (open positions + recent trades) rendered from the same
- * event-stream stats the landscape used.
+ * pool, the three sleeve toggles, the animated landscape (Phase
+ * PM4), and PolyCrypt9000's open positions below it, rendered from
+ * the same event-stream stats the landscape uses.
  *
  * ONE shared pool under both sides (Keith, 2026-11-08):
  * remaining = totalFunds − botAllocation − Σ open user selections.
@@ -207,7 +212,17 @@ function ScanPanel({ apiBase, alloc, onBooked }: ScanPanelProps) {
           Check the ones you want, enter an amount for each, then Submit.
         </p>
       )}
-      {loading && <p className="empty">Running the scan against Polymarket…</p>}
+      {loading && (
+        <div className="scan-loading" role="status" aria-live="polite">
+          <div className="scan-spinner" aria-hidden="true" />
+          <p>Running the scan against Polymarket…</p>
+          <div className="scan-skeleton" aria-hidden="true">
+            <div className="scan-skeleton-row" />
+            <div className="scan-skeleton-row" />
+            <div className="scan-skeleton-row" />
+          </div>
+        </div>
+      )}
 
       {data && (
         <>
@@ -302,7 +317,10 @@ interface BotTradesProps {
   alloc: AllocationState | null;
   refreshAlloc: () => void;
   stats: BotStats | undefined;
-  trades: FleetEvent[];
+  /** Phase PM4: the animated bot landscape, rendered by App (it owns
+   * the live refs the Landscape component reads) and placed here,
+   * above Open Positions. */
+  landscape?: ReactNode;
 }
 
 function BotTradesPanel({
@@ -310,7 +328,7 @@ function BotTradesPanel({
   alloc,
   refreshAlloc,
   stats,
-  trades,
+  landscape,
 }: BotTradesProps) {
   const [amountText, setAmountText] = useState("");
   const [amountDirty, setAmountDirty] = useState(false);
@@ -365,8 +383,6 @@ function BotTradesPanel({
       setError(err instanceof Error ? err.message : "Could not save the toggle.");
     }
   }
-
-  const recent = trades.slice(0, 12);
 
   return (
     <div className="split-panel">
@@ -441,6 +457,11 @@ function BotTradesPanel({
         </p>
       )}
 
+      {/* Phase PM4: the landscape sits where Open Positions began;
+          Open Positions move below it. The recent-trades list is
+          gone — full history lives in the Trade Stream below. */}
+      {landscape}
+
       {stats && stats.openPositions.length > 0 && (
         <>
           <h3 className="split-subtitle">Open positions</h3>
@@ -461,28 +482,6 @@ function BotTradesPanel({
         </>
       )}
 
-      <h3 className="split-subtitle">Recent bot trades</h3>
-      {recent.length === 0 && (
-        <p className="empty">No bot trades yet — the bot is live.</p>
-      )}
-      <ul className="scan-list">
-        {recent.map((e, i) => (
-          <li key={`${e.ts}-${i}`} className="scan-row">
-            <span className="scan-main">
-              <strong>
-                {e.type === "close" ? "closed" : "opened"} {e.symbol ?? ""}
-              </strong>
-              <span className="scan-sub">{fmtTime(e.ts)}</span>
-            </span>
-            {e.type === "close" && e.pnl !== null && (
-              <span className={e.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>
-                {fmtMoney(e.pnl, true)}
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
-
       {error && <p className="error">{error}</p>}
       {note && <p className="submit-note">{note}</p>}
       {alloc && <PoolLine alloc={alloc} />}
@@ -495,13 +494,14 @@ function BotTradesPanel({
 export interface SplitViewProps {
   apiBase: string;
   stats: BotStats | undefined;
-  /** PolyCrypt9000's open/close events, newest first. */
-  trades: FleetEvent[];
+  /** Phase PM4: the animated bot landscape node (built by App, which
+   * owns the live refs), rendered in the Bot Trades column. */
+  landscape?: ReactNode;
   /** Called after a batch books, so the Your Selections tab reloads. */
   onBooked: () => void;
 }
 
-export function SplitView({ apiBase, stats, trades, onBooked }: SplitViewProps) {
+export function SplitView({ apiBase, stats, landscape, onBooked }: SplitViewProps) {
   const [alloc, setAlloc] = useState<AllocationState | null>(null);
   const refreshAlloc = useCallback(() => {
     fetch(`${apiBase}/allocations`)
@@ -532,7 +532,7 @@ export function SplitView({ apiBase, stats, trades, onBooked }: SplitViewProps) 
         alloc={alloc}
         refreshAlloc={refreshAlloc}
         stats={stats}
-        trades={trades}
+        landscape={landscape}
       />
     </div>
   );

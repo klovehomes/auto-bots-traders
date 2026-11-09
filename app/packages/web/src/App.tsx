@@ -6,7 +6,6 @@ import {
   type InspectAnchor,
   type InspectControl,
 } from "./Landscape.js";
-import { Leaderboard } from "./Leaderboard.js";
 import { SplitView, YourSelectionsTab } from "./SplitView.js";
 import { BotAvatar } from "./avatars.js";
 import {
@@ -19,7 +18,6 @@ import {
 } from "./fleetState.js";
 
 type WsStatus = "connecting" | "connected" | "disconnected";
-type MainTab = "landscape" | "leaderboard";
 type FeedTab = "trades" | "decisions" | "selections";
 
 // --- Kill switch (Risk Gate control state, owned by the API) -----------
@@ -199,9 +197,6 @@ export function App() {
   const [modeBusy, setModeBusy] = useState(false);
   const [status, setStatus] = useState<WsStatus>("connecting");
   const [events, setEvents] = useState<FleetEvent[]>([]);
-  const [tab, setTab] = useState<MainTab>(
-    params.get("tab") === "leaderboard" ? "leaderboard" : "landscape",
-  );
   const [feedOpen, setFeedOpen] = useState(params.get("feed") === "open");
   const [feedTab, setFeedTab] = useState<FeedTab>("trades");
   // Phase PM3: bumped every time a user-selection batch books, so the
@@ -839,48 +834,49 @@ export function App() {
         </div>
       )}
 
-      <nav className="tabs" aria-label="Views">
-        <button
-          className={tab === "landscape" ? "tab active" : "tab"}
-          onClick={() => setTab("landscape")}
-        >
-          Landscape
-        </button>
-        <button
-          className={tab === "leaderboard" ? "tab active" : "tab"}
-          onClick={() => setTab("leaderboard")}
-        >
-          Leaderboard
-        </button>
-      </nav>
-
-      {tab === "landscape" ? (
-        <section className="split-wrap" aria-label="Market scans and Bot Trades">
-          {bots.length === 0 ? (
-            <div className="landscape-fallback">
-              <p>Loading bots…</p>
-            </div>
-          ) : (
-            /* Phase PM3: the split screen replaces the 3D landscape in
-               this view — left: the three Polymarket scans + manual
-               Submit; right: Bot Trades. The old Landscape component
-               is no longer rendered here. */
-            <SplitView
-              apiBase={API_BASE}
-              stats={bots[0] ? stats.get(bots[0].name) : undefined}
-              trades={events.filter(
-                (e) =>
-                  bots[0] !== undefined &&
-                  e.bot === bots[0].name &&
-                  (e.type === "open" || e.type === "close"),
-              )}
-              onBooked={() => setSelectionsVersion((v) => v + 1)}
-            />
-          )}
-        </section>
-      ) : (
-        <Leaderboard bots={bots} stats={stats} haltedNames={haltedNames} />
-      )}
+      {/* Phase PM4: the Leaderboard view is gone — the split screen is
+          the only main view. The bot landscape lives inside the Bot
+          Trades column; SplitView renders the node passed here. */}
+      <section className="split-wrap" aria-label="Market scans and Bot Trades">
+        {bots.length === 0 ? (
+          <div className="landscape-fallback">
+            <p>Loading bots…</p>
+          </div>
+        ) : (
+          <SplitView
+            apiBase={API_BASE}
+            stats={bots[0] ? stats.get(bots[0].name) : undefined}
+            landscape={
+              <div className="landscape-wrap bot-landscape">
+                {webglFailed ? (
+                  <div className="landscape-fallback">
+                    <p>
+                      The 3D landscape needs WebGL, which this
+                      browser/device could not provide. The scans,
+                      positions, and trade stream are fully live without
+                      it.
+                    </p>
+                  </div>
+                ) : (
+                  <Landscape
+                    bots={bots}
+                    statsRef={statsRef}
+                    effectsRef={effectsRef}
+                    haltedRef={haltedRef}
+                    onUnavailable={() => setWebglFailed(true)}
+                    onInspect={(name, pinned) =>
+                      setInspect(name ? { name, pinned } : null)
+                    }
+                    inspectAnchorRef={inspectAnchorRef}
+                    inspectControlRef={inspectControlRef}
+                  />
+                )}
+              </div>
+            }
+            onBooked={() => setSelectionsVersion((v) => v + 1)}
+          />
+        )}
+      </section>
 
       <section className="feed" aria-label="Trade stream">
         <button
@@ -1080,8 +1076,7 @@ export function App() {
         )}
       </section>
 
-      {tab === "landscape" &&
-        inspect &&
+      {inspect &&
         botByName.get(inspect.name) &&
         stats.get(inspect.name) && (
           <BuildingInspect
