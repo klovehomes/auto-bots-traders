@@ -16,8 +16,8 @@ import { useState } from "react";
  * a clearly-marked dev box so the flow can be tested end-to-end
  * without email. That field cannot appear in production config.
  *
- * Branding is text-only (no binary assets): the gate is part of the
- * private app bundle, not the public showcase.
+ * Branding uses the Traderbot.ai logo served from the web app's
+ * public assets, above the product name.
  */
 
 type Step = "email" | "code" | "done";
@@ -107,9 +107,11 @@ export function GateScreen(props: {
   return (
     <main className="gate-wrap">
       <div className="gate-card">
-        <div className="gate-logo-text" aria-hidden="true">
-          PM
-        </div>
+        <img
+          className="gate-logo gate-logo-img"
+          src="/pm-logo.webp"
+          alt="Traderbot.ai logo"
+        />
         <h1 className="gate-title">Prediction Markets Assistant</h1>
         <p className="gate-tagline">
           Polymarket-only trader — Polymarket shadow sleeve + BTC / ETH /

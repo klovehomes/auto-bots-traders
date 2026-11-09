@@ -1240,6 +1240,14 @@ body {
   border-radius: 50%;
   margin-bottom: 10px;
 }
+.gate-logo-img {
+  display: block;
+  width: 112px;
+  height: 112px;
+  margin-right: auto;
+  margin-left: auto;
+  object-fit: cover;
+}
 /* Phase PM7: text-only monogram for the in-app gate (no binary
    assets in the private bundle). */
 .gate-logo-text {
