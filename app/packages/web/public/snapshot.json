@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-09T01:21:58.558Z",
+  "fleetMode": "sim",
+  "bots": [
+    {
+      "codename": "polycrypt9000",
+      "displayName": "PolyCrypt9000",
+      "color": "#fbbf24",
+      "mode": "paper + shadow",
+      "balance": 10017.45,
+      "dayPnL": 0,
+      "positions": [
+        {
+          "symbol": "SOL/USD",
+          "qty": 12.5,
+          "side": "buy",
+          "avgEntry": 208.4
+        }
+      ]
+    }
+  ],
+  "recentTrades": [
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-89",
+      "symbol": "SOL/USD",
+      "side": "buy",
+      "qty": 12.5,
+      "price": 208.4,
+      "pnl": null,
+      "reason": "SIM · Donchian 20 breakout, ATR expanding; hourly — crypto sleeve entry.",
+      "ts": "2026-11-09T00:33:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "close",
+      "decision_id": "poly-sim-88",
+      "symbol": "YES — BTC above $100k by Dec 31",
+      "side": "sell",
+      "qty": 320,
+      "price": 0.61,
+      "pnl": 41.2,
+      "reason": "SIM · exit: market converged to model — edge captured.",
+      "ts": "2026-11-08T23:45:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-87",
+      "symbol": "YES — BTC above $100k by Dec 31",
+      "side": "buy",
+      "qty": 320,
+      "price": 0.482,
+      "pnl": null,
+      "reason": "SIM · market 48% vs model 61% — 13pt edge; quarter-Kelly — Polymarket sleeve entry (shadow).",
+      "ts": "2026-11-08T19:21:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "close",
+      "decision_id": "poly-sim-85",
+      "symbol": "BTC/USD",
+      "side": "sell",
+      "qty": 0.05,
+      "price": 102450,
+      "pnl": -23.75,
+      "reason": "SIM · exit: 2x ATR trailing stop.",
+      "ts": "2026-11-07T23:21:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-84",
+      "symbol": "BTC/USD",
+      "side": "buy",
+      "qty": 0.05,
+      "price": 103120,
+      "pnl": null,
+      "reason": "SIM · Donchian 20 breakout, ATR expanding; hourly — crypto sleeve entry.",
+      "ts": "2026-11-07T19:21:58.558Z"
+    }
+  ],
+  "recentDecisions": [
+    {
+      "bot": "PolyCrypt9000",
+      "type": "signal",
+      "decision_id": "poly-sim-90",
+      "symbol": null,
+      "side": null,
+      "qty": null,
+      "price": null,
+      "pnl": null,
+      "reason": "SIM · Polymarket scan: 214 liquid markets priced — best model-vs-market gap 5.2pts, below the 8pt entry rule. No trade.",
+      "ts": "2026-11-09T01:03:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-89",
+      "symbol": "SOL/USD",
+      "side": "buy",
+      "qty": 12.5,
+      "price": 208.4,
+      "pnl": null,
+      "reason": "SIM · Donchian 20 breakout, ATR expanding; hourly — crypto sleeve entry.",
+      "ts": "2026-11-09T00:33:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "close",
+      "decision_id": "poly-sim-88",
+      "symbol": "YES — BTC above $100k by Dec 31",
+      "side": "sell",
+      "qty": 320,
+      "price": 0.61,
+      "pnl": 41.2,
+      "reason": "SIM · exit: market converged to model — edge captured.",
+      "ts": "2026-11-08T23:45:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "signal",
+      "decision_id": "poly-sim-86",
+      "symbol": "ETH/USD",
+      "side": null,
+      "qty": null,
+      "price": null,
+      "pnl": null,
+      "reason": "SIM · ETH/USD +1.8% over 4h — below the Donchian breakout trigger. No trade.",
+      "ts": "2026-11-08T22:21:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-87",
+      "symbol": "YES — BTC above $100k by Dec 31",
+      "side": "buy",
+      "qty": 320,
+      "price": 0.482,
+      "pnl": null,
+      "reason": "SIM · market 48% vs model 61% — 13pt edge; quarter-Kelly — Polymarket sleeve entry (shadow).",
+      "ts": "2026-11-08T19:21:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "close",
+      "decision_id": "poly-sim-85",
+      "symbol": "BTC/USD",
+      "side": "sell",
+      "qty": 0.05,
+      "price": 102450,
+      "pnl": -23.75,
+      "reason": "SIM · exit: 2x ATR trailing stop.",
+      "ts": "2026-11-07T23:21:58.558Z"
+    },
+    {
+      "bot": "PolyCrypt9000",
+      "type": "open",
+      "decision_id": "poly-sim-84",
+      "symbol": "BTC/USD",
+      "side": "buy",
+      "qty": 0.05,
+      "price": 103120,
+      "pnl": null,
+      "reason": "SIM · Donchian 20 breakout, ATR expanding; hourly — crypto sleeve entry.",
+      "ts": "2026-11-07T19:21:58.558Z"
+    }
+  ],
+  "totals": {
+    "equity": 10017.45,
+    "dayPnL": 0
+  }
+}
