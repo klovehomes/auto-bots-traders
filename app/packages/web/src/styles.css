@@ -1327,3 +1327,238 @@ body {
   font-size: 12px;
   line-height: 1.55;
 }
+
+/* ── Phase PM3: split screen (scans + Bot Trades) ──────────────────
+   Replaces the 3D landscape in the main view. Left: the three
+   Polymarket scans with checkbox + amount + Submit. Right: Bot
+   Trades — allocation, sleeve toggles, bot activity. One shared
+   pool line under both panels. */
+.split-wrap {
+  margin-bottom: 18px;
+}
+
+.split-view {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+@media (max-width: 900px) {
+  .split-view {
+    grid-template-columns: 1fr;
+  }
+}
+
+.split-panel {
+  border: 1px solid #1b2740;
+  border-radius: 16px;
+  background: rgba(9, 14, 26, 0.6);
+  padding: 14px 16px;
+  min-width: 0;
+}
+
+.split-title {
+  margin: 0 0 10px;
+  font-size: 19px;
+  letter-spacing: 0.02em;
+}
+
+.split-subtitle {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b98a9;
+}
+
+.scan-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.scan-meta {
+  color: #8b98a9;
+  font-size: 13px;
+  margin: 8px 2px;
+}
+
+.scan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 430px;
+  overflow-y: auto;
+}
+
+.scan-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border: 1px solid #1b2740;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  background: rgba(13, 20, 36, 0.6);
+  font-size: 14px;
+}
+
+.scan-check input {
+  width: 17px;
+  height: 17px;
+  accent-color: #1f6feb;
+  cursor: pointer;
+}
+
+.scan-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.scan-main strong {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.scan-sub {
+  display: block;
+  color: #8b98a9;
+  font-size: 12.5px;
+}
+
+.scan-amount {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #8b98a9;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.scan-amount input {
+  width: 84px;
+  background: #0d1424;
+  color: #e6edf3;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.scan-amount input:disabled {
+  opacity: 0.4;
+}
+
+.scan-submit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.scan-checked-total {
+  color: #aeb9c6;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.submit-note {
+  color: #3fb950;
+  font-size: 13.5px;
+  margin: 10px 2px 0;
+}
+
+.pool-line {
+  border-top: 1px solid #1b2740;
+  margin: 12px 0 0;
+  padding-top: 10px;
+  color: #8b98a9;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-line strong {
+  color: #e6edf3;
+}
+
+.bot-alloc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bot-alloc-row label {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b98a9;
+}
+
+.sleeve-rows {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sleeve-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.arm-switch.sleeve-on {
+  background: rgba(63, 185, 80, 0.3);
+  border-color: #238636;
+}
+
+.arm-switch.sleeve-on .arm-knob {
+  background: #7ee2a0;
+}
+
+.sleeve-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sleeve-state {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #8b98a9;
+}
+
+.sleeve-state.on {
+  color: #3fb950;
+}
+
+/* Your Selections feed tab */
+.selections-list {
+  max-height: none;
+}
+
+.selection-row .scan-sub {
+  margin-top: 1px;
+}
+
+.selection-value {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.selections-totals {
+  color: #aeb9c6;
+}
+
+.selections-totals strong {
+  color: #e6edf3;
+}

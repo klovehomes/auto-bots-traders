@@ -29,6 +29,10 @@ services:
       # dashboard's Decisions tab shows the full day even when no tab
       # was open while the bots were deciding.
       EVENT_HISTORY_PATH: /data/event-history.json
+      # Phase PM3 (split-screen allocations): the shared-pool ledger —
+      # Bot Trades allocation, sleeve toggles, booked user selections —
+      # on the same shared volume, following the control-state pattern.
+      ALLOCATIONS_STATE_PATH: /data/allocations.json
     volumes:
       # Bot definitions live outside the app image; mounted read-only.
       - ../bots:/bots:ro

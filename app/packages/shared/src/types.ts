@@ -91,3 +91,106 @@ export interface FleetEvent {
    */
   seq?: number;
 }
+
+// ---------------------------------------------------------------------------
+// Phase PM3 (Polymarket-only): split-screen scans, the shared-pool
+// allocation ledger, and user selections. The API owns all of this
+// state; the web dashboard only renders it.
+// ---------------------------------------------------------------------------
+
+/** One of the three Polymarket scans Keith defined (Nov 6 scans). */
+export interface ScanDefinition {
+  /** "1" | "2" | "3" — also the /scans/:id/results path segment. */
+  id: string;
+  label: string;
+  description: string;
+}
+
+/** One in-band market from a scan's result list. */
+export interface ScanResultItem {
+  marketId: string;
+  question: string;
+  /** The outcome whose price sits in the 82–90¢ band (e.g. "No"). */
+  outcome: string;
+  /** That outcome's price, 0–1 (0.885 = 88.5¢). */
+  price: number;
+  /** Total market volume in dollars (Gamma volumeNum). */
+  volume: number;
+  /** ISO-8601 end date, or null when Gamma omits it. */
+  endDate: string | null;
+  slug: string;
+}
+
+export interface ScanResultsResponse {
+  scanId: string;
+  label: string;
+  /** ISO-8601 time the API fetched (or cached) this data. */
+  fetchedAt: string;
+  /**
+   * Total in-band markets in the scan's universe. Null only for the
+   * Full Universe scan while its background full-pagination count is
+   * still running — results are never blocked on it.
+   */
+  count: number | null;
+  results: ScanResultItem[];
+}
+
+/** The three trading sleeves of the split screen — independently
+ *  switchable. Stored server-side in the allocation ledger. */
+export interface SleeveToggles {
+  crypto: boolean;
+  kalshi: boolean;
+  polymarket: boolean;
+}
+
+/** One user selection booked from the left (scan) panel on Submit. */
+export interface UserSelection {
+  id: string;
+  marketId: string;
+  question: string;
+  outcome: string;
+  scanId: string;
+  scanLabel: string;
+  /** Dollars the user allocated to this market. */
+  amount: number;
+  /** Outcome price (0–1) at the moment of selection. */
+  priceAtSelection: number;
+  /** ISO-8601 timestamp. */
+  ts: string;
+  status: "Open";
+}
+
+/** A user selection enriched with a live re-price from Gamma. */
+export interface UserSelectionValuation extends UserSelection {
+  currentPrice: number;
+  /** (amount / priceAtSelection) × currentPrice. */
+  currentValue: number;
+  /** currentValue − amount. */
+  pnl: number;
+}
+
+export interface UserSelectionsResponse {
+  selections: UserSelectionValuation[];
+  totals: {
+    totalAllocated: number;
+    totalCurrentValue: number;
+    totalPnl: number;
+  };
+}
+
+/**
+ * The shared-pool allocation state (GET /allocations). ONE pool under
+ * both halves of the split screen:
+ * remainingAvailable = totalFunds − botAllocation − Σ open selections.
+ */
+export interface AllocationState {
+  /** PolyCrypt9000's current book equity (API-derived; 10000 fallback). */
+  totalFunds: number;
+  /** Portion of the pool carved out for the Bot Trades section. */
+  botAllocation: number;
+  /** Σ amounts of open user selections. */
+  userSelectionsTotal: number;
+  remainingAvailable: number;
+  sleeveToggles: SleeveToggles;
+  userSelections: UserSelection[];
+}

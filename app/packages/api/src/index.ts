@@ -18,6 +18,15 @@ import {
 } from "./control.js";
 import { ModeStore } from "./mode.js";
 import { EventHistoryStore } from "./history.js";
+import { ScanService } from "./gamma.js";
+import { AllocationStore } from "./allocations.js";
+import type {
+  AllocationState,
+  SleeveToggles,
+  UserSelection,
+  UserSelectionValuation,
+  UserSelectionsResponse,
+} from "@fleet/shared/types";
 
 const PORT = Number(process.env.API_PORT ?? 8080);
 const INTERNAL_EVENT_TOKEN = process.env.INTERNAL_EVENT_TOKEN ?? "dev-token";
@@ -53,6 +62,16 @@ const MODE_STATE_PATH =
  */
 const EVENT_HISTORY_PATH =
   process.env.EVENT_HISTORY_PATH ?? "./data/event-history.json";
+/**
+ * Where the shared-pool allocation ledger persists (Phase PM3): bot
+ * allocation, sleeve toggles, and booked user selections. Same
+ * durability requirement — in Docker it lives on the shared
+ * fleet-data volume next to the control/mode/history state.
+ */
+const ALLOCATIONS_STATE_PATH =
+  process.env.ALLOCATIONS_STATE_PATH ?? "./data/allocations.json";
+/** PolyCrypt9000's starting book (matches fleetState START_EQUITY). */
+const START_EQUITY = 10000;
 /** How long a kill-liquidate POST waits for the engine's report before
  *  answering with a still-pending report (the report completes over the
  *  WebSocket when it lands). The sim engine polls every 1 s. */
@@ -103,6 +122,56 @@ async function main(): Promise<void> {
   app.addHook("onClose", async () => {
     historyStore.close();
   });
+
+  // Phase PM3: the Polymarket scan service (live Gamma data, cached
+  // server-side) and the shared-pool allocation ledger.
+  const scanService = new ScanService();
+  const allocationStore = new AllocationStore(ALLOCATIONS_STATE_PATH);
+  app.log.info(`allocations: ${ALLOCATIONS_STATE_PATH}`);
+
+  const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+  /**
+   * Total available funds for the shared pool: PolyCrypt9000's current
+   * book equity — the single bot this branch loads — derived from the
+   * API's own event history the same way the dashboard derives it
+   * (start equity + cumulative realized PnL from closes). Falls back
+   * to the $10,000 start when no closes have been recorded.
+   */
+  function totalFunds(): number {
+    const bot = bots[0];
+    if (!bot) return START_EQUITY;
+    let realized = 0;
+    for (const e of historyStore.snapshot().events) {
+      if (e.bot === bot.name && e.type === "close" && e.pnl !== null) {
+        realized += e.pnl;
+      }
+    }
+    const equity = round2(START_EQUITY + realized);
+    return equity > 0 ? equity : START_EQUITY;
+  }
+
+  function allocationState(): AllocationState {
+    const total = totalFunds();
+    const ledger = allocationStore.ledger;
+    const selectionsTotal = allocationStore.openSelectionsTotal();
+    return {
+      totalFunds: total,
+      botAllocation: ledger.botAllocation,
+      userSelectionsTotal: selectionsTotal,
+      remainingAvailable: round2(total - ledger.botAllocation - selectionsTotal),
+      sleeveToggles: ledger.sleeveToggles,
+      userSelections: ledger.userSelections,
+    };
+  }
+
+  let selectionCounter = 0;
+  function newSelectionId(): string {
+    selectionCounter += 1;
+    return `sel-${Date.now().toString(36)}-${selectionCounter.toString(36)}-${Math.floor(
+      Math.random() * 1e6,
+    ).toString(36)}`;
+  }
 
   /** Live WebSocket clients subscribed to /events. */
   const clients = new Set<WebSocket>();
@@ -322,6 +391,238 @@ async function main(): Promise<void> {
   // to seed the stream/Decisions state before merging live frames.
   // Same trust boundary as the other read endpoints (private network).
   app.get("/events/history", async () => historyStore.snapshot());
+
+  // --- Phase PM3: split-screen scans + shared-pool allocations --------
+  // Same trust boundary as the other dashboard endpoints: private
+  // network only (Tailscale), never public. Gamma data is fetched
+  // HERE, server-side — the browser never calls Polymarket directly.
+
+  app.get("/scans", async () => scanService.definitions());
+
+  app.get<{ Params: { id: string } }>(
+    "/scans/:id/results",
+    async (request, reply) => {
+      try {
+        const results = await scanService.getResults(request.params.id);
+        if (!results) {
+          return reply.code(404).send({ error: "unknown scan" });
+        }
+        return results;
+      } catch (err) {
+        return reply.code(502).send({
+          error: `Polymarket scan failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    },
+  );
+
+  app.get("/allocations", async () => allocationState());
+
+  // Carve out (or resize) the Bot Trades portion of the shared pool.
+  app.post("/allocations/bot", async (request, reply) => {
+    const body = request.body as { amount?: unknown } | null;
+    const amount = typeof body?.amount === "number" ? body.amount : NaN;
+    if (!Number.isFinite(amount) || amount < 0) {
+      return reply
+        .code(400)
+        .send({ error: "amount must be a number >= 0" });
+    }
+    const total = totalFunds();
+    const selectionsTotal = allocationStore.openSelectionsTotal();
+    if (round2(amount + selectionsTotal) > total) {
+      return reply.code(400).send({
+        error:
+          `Bot allocation of $${round2(amount).toFixed(2)} would exceed the shared pool: ` +
+          `$${selectionsTotal.toFixed(2)} is already in open user selections ` +
+          `out of $${total.toFixed(2)} total available funds.`,
+      });
+    }
+    allocationStore.setBotAllocation(amount);
+    return allocationState();
+  });
+
+  // The three independent sleeve toggles (Crypto / Kalshi /
+  // Polymarket) — stored settings, persisted in the ledger.
+  app.post("/allocations/sleeves", async (request, reply) => {
+    const body = request.body as Partial<
+      Record<keyof SleeveToggles, unknown>
+    > | null;
+    const partial: Partial<SleeveToggles> = {};
+    for (const key of ["crypto", "kalshi", "polymarket"] as const) {
+      if (typeof body?.[key] === "boolean") partial[key] = body[key] as boolean;
+    }
+    if (Object.keys(partial).length === 0) {
+      return reply.code(400).send({
+        error: "provide at least one boolean sleeve toggle",
+      });
+    }
+    allocationStore.setSleeveToggles(partial);
+    return allocationState();
+  });
+
+  /**
+   * Book a batch of user selections from the left scan panel. The
+   * batch is validated against the shared pool as a WHOLE first —
+   * an over-pool batch books nothing (never a partial fill).
+   * Selections book inside the app in this cut; external paper
+   * execution (Kalshi demo / Alpaca) is the next phase.
+   */
+  app.post("/user-selections", async (request, reply) => {
+    const body = request.body as {
+      items?: {
+        scanId?: unknown;
+        marketId?: unknown;
+        outcome?: unknown;
+        amount?: unknown;
+        price?: unknown;
+        question?: unknown;
+      }[];
+    } | null;
+    const items = Array.isArray(body?.items) ? body!.items : [];
+    if (items.length === 0) {
+      return reply.code(400).send({
+        error:
+          "nothing to submit — check at least one market and enter a dollar amount for it",
+      });
+    }
+
+    interface ParsedItem {
+      scanId: string;
+      marketId: string;
+      outcome: string;
+      amount: number;
+      clientPrice: number | null;
+      clientQuestion: string | null;
+    }
+    const parsed: ParsedItem[] = [];
+    for (const raw of items) {
+      const scanId = typeof raw.scanId === "string" ? raw.scanId : "";
+      const marketId = typeof raw.marketId === "string" ? raw.marketId : "";
+      const outcome = typeof raw.outcome === "string" ? raw.outcome : "";
+      const amount = typeof raw.amount === "number" ? raw.amount : NaN;
+      if (!scanService.labelFor(scanId)) {
+        return reply.code(400).send({ error: `unknown scan: ${scanId || "(missing)"}` });
+      }
+      if (!marketId || !outcome) {
+        return reply
+          .code(400)
+          .send({ error: "each item needs a marketId and an outcome" });
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return reply.code(400).send({
+          error: `amount for market ${marketId} must be a dollar amount above 0`,
+        });
+      }
+      parsed.push({
+        scanId,
+        marketId,
+        outcome,
+        amount: round2(amount),
+        clientPrice:
+          typeof raw.price === "number" && raw.price > 0 ? raw.price : null,
+        clientQuestion:
+          typeof raw.question === "string" && raw.question ? raw.question : null,
+      });
+    }
+
+    // Shared-pool validation for the batch as a whole.
+    const state = allocationState();
+    const batchSum = round2(parsed.reduce((s, i) => s + i.amount, 0));
+    const needed = round2(state.botAllocation + state.userSelectionsTotal + batchSum);
+    if (needed > state.totalFunds) {
+      return reply.code(400).send({
+        error:
+          `This batch ($${batchSum.toFixed(2)}) would exceed the shared pool: ` +
+          `$${state.botAllocation.toFixed(2)} Bot Trades allocation + ` +
+          `$${state.userSelectionsTotal.toFixed(2)} existing user selections + ` +
+          `$${batchSum.toFixed(2)} new = $${needed.toFixed(2)}, over the ` +
+          `$${state.totalFunds.toFixed(2)} total available funds. Nothing was booked.`,
+      });
+    }
+
+    // Price each item at selection time: cached scan price first
+    // (exactly what the user saw), then a live Gamma lookup, then —
+    // only if Gamma is unreachable — the client-supplied price.
+    const booked: UserSelection[] = [];
+    const now = new Date().toISOString();
+    for (const item of parsed) {
+      let resolved: { question: string; outcome: string; price: number } | null =
+        null;
+      try {
+        resolved = await scanService.resolveSelection(
+          item.scanId,
+          item.marketId,
+          item.outcome,
+        );
+      } catch {
+        resolved = null;
+      }
+      if (!resolved && item.clientPrice !== null && item.clientQuestion) {
+        resolved = {
+          question: item.clientQuestion,
+          outcome: item.outcome,
+          price: item.clientPrice,
+        };
+      }
+      if (!resolved) {
+        return reply.code(502).send({
+          error: `could not price market ${item.marketId} from Polymarket right now — nothing was booked`,
+        });
+      }
+      booked.push({
+        id: newSelectionId(),
+        marketId: item.marketId,
+        question: resolved.question,
+        outcome: resolved.outcome,
+        scanId: item.scanId,
+        scanLabel: scanService.labelFor(item.scanId)!,
+        amount: item.amount,
+        priceAtSelection: resolved.price,
+        ts: now,
+        status: "Open",
+      });
+    }
+    allocationStore.addSelections(booked);
+    return { ok: true, booked, allocations: allocationState() };
+  });
+
+  /**
+   * User selections with a live valuation: each selection is
+   * re-priced from Gamma by market id when this loads (falling back
+   * to its selection price when Gamma can't price it), and valued as
+   * shares = amount / priceAtSelection, value = shares × current.
+   */
+  app.get("/user-selections", async (): Promise<UserSelectionsResponse> => {
+    const selections: UserSelectionValuation[] = [];
+    let totalAllocated = 0;
+    let totalCurrentValue = 0;
+    for (const s of allocationStore.ledger.userSelections) {
+      const current =
+        (await scanService
+          .currentPrice(s.marketId, s.outcome)
+          .catch(() => null)) ?? s.priceAtSelection;
+      const shares = s.priceAtSelection > 0 ? s.amount / s.priceAtSelection : 0;
+      const value = round2(shares * current);
+      totalAllocated += s.amount;
+      totalCurrentValue += value;
+      selections.push({
+        ...s,
+        currentPrice: current,
+        currentValue: value,
+        pnl: round2(value - s.amount),
+      });
+    }
+    totalAllocated = round2(totalAllocated);
+    totalCurrentValue = round2(totalCurrentValue);
+    return {
+      selections,
+      totals: {
+        totalAllocated,
+        totalCurrentValue,
+        totalPnl: round2(totalCurrentValue - totalAllocated),
+      },
+    };
+  });
 
   app.get("/events", { websocket: true }, (socket) => {
     clients.add(socket);

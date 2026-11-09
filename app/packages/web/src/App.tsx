@@ -7,6 +7,7 @@ import {
   type InspectControl,
 } from "./Landscape.js";
 import { Leaderboard } from "./Leaderboard.js";
+import { SplitView, YourSelectionsTab } from "./SplitView.js";
 import { BotAvatar } from "./avatars.js";
 import {
   computeStats,
@@ -19,7 +20,7 @@ import {
 
 type WsStatus = "connecting" | "connected" | "disconnected";
 type MainTab = "landscape" | "leaderboard";
-type FeedTab = "trades" | "decisions";
+type FeedTab = "trades" | "decisions" | "selections";
 
 // --- Kill switch (Risk Gate control state, owned by the API) -----------
 export interface LiquidationReport {
@@ -203,6 +204,9 @@ export function App() {
   );
   const [feedOpen, setFeedOpen] = useState(params.get("feed") === "open");
   const [feedTab, setFeedTab] = useState<FeedTab>("trades");
+  // Phase PM3: bumped every time a user-selection batch books, so the
+  // "Your Selections" feed tab reloads its valuations.
+  const [selectionsVersion, setSelectionsVersion] = useState(0);
   const [botFilter, setBotFilter] = useState<string>("all");
   const [textFilter, setTextFilter] = useState<string>("");
   const [selected, setSelected] = useState<FleetEvent | null>(null);
@@ -851,31 +855,26 @@ export function App() {
       </nav>
 
       {tab === "landscape" ? (
-        <section className="landscape-wrap" aria-label="Landscape">
-          {webglFailed ? (
-            <div className="landscape-fallback">
-              <p>
-                The 3D landscape needs WebGL, which this browser/device could
-                not provide. The totals, leaderboard, and trade stream below
-                are fully live without it.
-              </p>
-            </div>
-          ) : bots.length === 0 ? (
+        <section className="split-wrap" aria-label="Market scans and Bot Trades">
+          {bots.length === 0 ? (
             <div className="landscape-fallback">
               <p>Loading bots…</p>
             </div>
           ) : (
-            <Landscape
-              bots={bots}
-              statsRef={statsRef}
-              effectsRef={effectsRef}
-              haltedRef={haltedRef}
-              onUnavailable={() => setWebglFailed(true)}
-              onInspect={(name, pinned) =>
-                setInspect(name ? { name, pinned } : null)
-              }
-              inspectAnchorRef={inspectAnchorRef}
-              inspectControlRef={inspectControlRef}
+            /* Phase PM3: the split screen replaces the 3D landscape in
+               this view — left: the three Polymarket scans + manual
+               Submit; right: Bot Trades. The old Landscape component
+               is no longer rendered here. */
+            <SplitView
+              apiBase={API_BASE}
+              stats={bots[0] ? stats.get(bots[0].name) : undefined}
+              trades={events.filter(
+                (e) =>
+                  bots[0] !== undefined &&
+                  e.bot === bots[0].name &&
+                  (e.type === "open" || e.type === "close"),
+              )}
+              onBooked={() => setSelectionsVersion((v) => v + 1)}
             />
           )}
         </section>
@@ -918,6 +917,12 @@ export function App() {
                 >
                   Decisions
                 </button>
+                <button
+                  className={feedTab === "selections" ? "tab small active" : "tab small"}
+                  onClick={() => setFeedTab("selections")}
+                >
+                  Your Selections
+                </button>
               </div>
               <div className="feed-filter-group">
                 <input
@@ -945,7 +950,12 @@ export function App() {
               </div>
             </div>
 
-            {feedTab === "trades" ? (
+            {feedTab === "selections" ? (
+              <YourSelectionsTab
+                apiBase={API_BASE}
+                refreshKey={selectionsVersion}
+              />
+            ) : feedTab === "trades" ? (
               <>
                 {feedRows.length === 0 && (
                   <p className="empty">
