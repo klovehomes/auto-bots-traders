@@ -1215,11 +1215,11 @@ body {
   align-items: baseline;
 }
 
-/* ── Phase 9: email gate (src/gate.tsx, gate.html only) ─────────────
-   The public front door: a centered card with the TraderBot logo, an
-   email form, then a 6-digit code form. Rendered only by the gate
-   entry — neither the showcase app nor the private dashboard use
-   these classes. */
+/* ── Email gate ─────────────────────────────────────────────────────
+   Phase 9 (v17): the showcase's public front door (src/gate.tsx).
+   Phase PM7: the same classes render the private dashboard's
+   in-app gate screen (src/GateScreen.tsx) — a centered card with an
+   email form, then a 6-digit code form. */
 .gate-wrap {
   min-height: 100vh;
   display: flex;
@@ -1239,6 +1239,23 @@ body {
 .gate-logo {
   border-radius: 50%;
   margin-bottom: 10px;
+}
+/* Phase PM7: text-only monogram for the in-app gate (no binary
+   assets in the private bundle). */
+.gate-logo-text {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 12px;
+  border-radius: 50%;
+  border: 1px solid rgba(245, 214, 123, 0.55);
+  background: rgba(245, 214, 123, 0.1);
+  color: #f5d67b;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .gate-title {
   margin: 0;
@@ -1660,6 +1677,38 @@ body {
 
 .sleeve-state.on {
   color: #3fb950;
+}
+
+/* Phase PM6: a sleeve that can't really trade in the current run
+   mode is greyed where it sits — dimmed, its switch disabled, and
+   the reason in amber under its description. The stored ON/OFF
+   preference still renders (dimmed with the row); it just can't be
+   changed or take effect while the sleeve is unavailable. */
+.sleeve-row.unavailable {
+  opacity: 0.55;
+}
+
+.sleeve-row.unavailable .arm-switch {
+  cursor: not-allowed;
+}
+
+.sleeve-reason {
+  color: #f0b429;
+  font-size: 12px;
+}
+
+.bot-alloc-row.unavailable {
+  opacity: 0.55;
+}
+
+.bot-alloc-row.unavailable input {
+  cursor: not-allowed;
+}
+
+.panel-block-note {
+  margin: 8px 0 0;
+  color: #f0b429;
+  font-size: 13px;
 }
 
 /* Your Selections feed tab */

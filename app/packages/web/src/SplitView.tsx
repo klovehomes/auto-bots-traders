@@ -7,8 +7,10 @@ import {
 } from "react";
 import type {
   AllocationState,
+  FleetMode,
   ScanDefinition,
   ScanResultsResponse,
+  SleeveAvailability,
   SleeveToggles,
   UserSelectionValuation,
   UserSelectionsResponse,
@@ -37,6 +39,14 @@ import { fmtMoney, fmtTime, type BotStats } from "./fleetState.js";
  * re-priced book the “Your Selections” tab below shows). Selecting a
  * scan swaps the area to that scan; clicking the active scan chip
  * again deselects it and returns to the holdings view.
+ *
+ * Phase PM6: the Bot Trades panel renders the API-computed sleeve
+ * availability that rides along on GET /allocations — a sleeve that
+ * can't really trade in the current run mode is greyed, its toggle
+ * disabled, and its reason shown. The stored toggle preferences are
+ * rendered as-is underneath the greying; availability never edits
+ * them. App passes the desired run mode down so a mode flip
+ * re-fetches this state (availability is never stale).
  */
 
 const SLEEVES: { key: keyof SleeveToggles; label: string; hint: string }[] = [
@@ -44,6 +54,16 @@ const SLEEVES: { key: keyof SleeveToggles; label: string; hint: string }[] = [
   { key: "kalshi", label: "Kalshi", hint: "Kalshi prediction-markets sleeve" },
   { key: "polymarket", label: "Polymarket", hint: "Polymarket shadow sleeve" },
 ];
+
+/** Phase PM6: one sleeve's server-computed availability from the
+ *  allocations state (undefined until the state loads — the panel
+ *  then renders exactly as it did before PM6). */
+function sleeveAvailability(
+  alloc: AllocationState | null,
+  key: keyof SleeveToggles,
+): SleeveAvailability | undefined {
+  return alloc?.sleeveAvailability.find((a) => a.sleeve === key);
+}
 
 function fmtCents(price: number): string {
   return `${(price * 100).toFixed(1)}¢`;
@@ -413,6 +433,10 @@ function BotTradesPanel({
   }
 
   async function flipSleeve(key: keyof SleeveToggles, on: boolean): Promise<void> {
+    // Phase PM6: a sleeve the API says can't trade in this run mode
+    // can't be flipped either (its button is disabled as well — this
+    // is defense in depth). Its stored preference stays untouched.
+    if (sleeveAvailability(alloc, key)?.available === false) return;
     setError(null);
     try {
       const res = await fetch(`${apiBase}/allocations/sleeves`, {
@@ -428,11 +452,15 @@ function BotTradesPanel({
     }
   }
 
+  // Phase PM6: when NO sleeve can trade in the current run mode,
+  // the API greys the allocation control too (botAllocationAvailable).
+  const allocBlocked = alloc !== null && !alloc.botAllocationAvailable;
+
   return (
     <div className="split-panel">
       <h2 className="split-title">Bot Trades</h2>
 
-      <div className="bot-alloc-row">
+      <div className={`bot-alloc-row${allocBlocked ? " unavailable" : ""}`}>
         <label htmlFor="bot-alloc-input">Bot allocation</label>
         <span className="scan-amount">
           $
@@ -443,6 +471,7 @@ function BotTradesPanel({
             step="any"
             inputMode="decimal"
             value={amountText}
+            disabled={allocBlocked}
             onChange={(e) => {
               setAmountText(e.target.value);
               setAmountDirty(true);
@@ -453,7 +482,7 @@ function BotTradesPanel({
         <button
           className="btn"
           onClick={() => void saveAllocation()}
-          disabled={busy || !alloc}
+          disabled={busy || !alloc || allocBlocked}
         >
           {busy ? "Saving…" : "Save"}
         </button>
@@ -462,18 +491,30 @@ function BotTradesPanel({
         The portion of the shared pool the bot trades with, carved out
         of your total available funds. The bot trades only inside it.
       </p>
+      {allocBlocked && alloc?.botAllocationReason && (
+        <p className="panel-block-note" role="note">
+          {alloc.botAllocationReason}
+        </p>
+      )}
 
       <div className="sleeve-rows">
         {SLEEVES.map(({ key, label, hint }) => {
           const on = alloc?.sleeveToggles[key] ?? true;
+          const availability = sleeveAvailability(alloc, key);
+          const unavailable = availability !== undefined && !availability.available;
           return (
-            <div key={key} className="sleeve-row">
+            <div
+              key={key}
+              className={`sleeve-row${unavailable ? " unavailable" : ""}`}
+            >
               <button
                 type="button"
                 role="switch"
                 aria-checked={on}
                 aria-label={`${label} sleeve`}
                 className={`arm-switch${on ? " on sleeve-on" : ""}`}
+                disabled={unavailable}
+                title={unavailable ? availability.reason ?? undefined : undefined}
                 onClick={() => void flipSleeve(key, !on)}
               >
                 <span className="arm-knob" />
@@ -481,6 +522,9 @@ function BotTradesPanel({
               <span className="sleeve-label">
                 <strong>{label}</strong>
                 <span className="scan-sub">{hint}</span>
+                {unavailable && availability.reason && (
+                  <span className="sleeve-reason">{availability.reason}</span>
+                )}
               </span>
               <span className={on ? "sleeve-state on" : "sleeve-state"}>
                 {on ? "ON" : "OFF"}
@@ -543,9 +587,17 @@ export interface SplitViewProps {
   landscape?: ReactNode;
   /** Called after a batch books, so the Your Selections tab reloads. */
   onBooked: () => void;
+  /** Phase PM6: the API-owned desired run mode (from App's mode
+   * state, kept live by the WebSocket mode broadcasts). Used ONLY as
+   * a refresh trigger: when it changes, the allocations state —
+   * which carries the server-computed sleeve availability for that
+   * mode — is re-fetched, so the Bot Trades greying is never stale
+   * after a mode switch. The availability itself always comes from
+   * the API, never from this prop. */
+  runMode: FleetMode | null;
 }
 
-export function SplitView({ apiBase, stats, landscape, onBooked }: SplitViewProps) {
+export function SplitView({ apiBase, stats, landscape, onBooked, runMode }: SplitViewProps) {
   const [alloc, setAlloc] = useState<AllocationState | null>(null);
   const refreshAlloc = useCallback(() => {
     fetch(`${apiBase}/allocations`)
@@ -559,7 +611,7 @@ export function SplitView({ apiBase, stats, landscape, onBooked }: SplitViewProp
 
   useEffect(() => {
     refreshAlloc();
-  }, [refreshAlloc]);
+  }, [refreshAlloc, runMode]);
 
   return (
     <div className="split-view">

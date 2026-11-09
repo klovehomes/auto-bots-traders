@@ -7,6 +7,7 @@ import {
   type InspectControl,
 } from "./Landscape.js";
 import { SplitView, YourSelectionsTab } from "./SplitView.js";
+import { GateScreen } from "./GateScreen.js";
 import { BotAvatar } from "./avatars.js";
 import {
   computeStats,
@@ -185,7 +186,7 @@ interface EventHistoryResponse {
 
 const params = new URLSearchParams(window.location.search);
 
-export function App() {
+function Dashboard() {
   const [bots, setBots] = useState<BotConfig[]>([]);
   const [botsError, setBotsError] = useState<string | null>(null);
   // Mode switch (Phase 5): the API-owned mode state (desired + the
@@ -845,6 +846,7 @@ export function App() {
         ) : (
           <SplitView
             apiBase={API_BASE}
+            runMode={desiredMode}
             stats={bots[0] ? stats.get(bots[0].name) : undefined}
             landscape={
               <div className="landscape-wrap bot-landscape">
@@ -1465,4 +1467,135 @@ function BuildingInspect({
       )}
     </div>
   );
+}
+
+// --- Phase PM7: email gate wrapper --------------------------------------
+// On load the wrapper asks GET /gate/status. Gate off (or the status
+// call failing) → the dashboard boots exactly as it always has. Gate
+// on + no valid session → the gate screen renders instead, and a
+// successful verify swaps the dashboard in (the pm_session cookie
+// rides along automatically). If the session later dies (expired or
+// tampered), the next API 401 bounces back to the gate screen.
+
+const GATE_BOUNCE_EVENT = "pm-gate-unauthorized";
+let gateFetchInterceptorInstalled = false;
+
+/**
+ * One global fetch patch, two jobs:
+ * 1. Every call to the API carries credentials — the session cookie
+ *    lives on the API origin (web :4173 → api :8080 is cross-origin),
+ *    and without credentials:"include" the browser would neither send
+ *    it nor store the one /gate/verify sets.
+ * 2. A 401 from any non-gate API path raises the bounce event so the
+ *    wrapper can re-check status and show the gate screen again.
+ */
+function installGateFetchInterceptor(): void {
+  if (gateFetchInterceptorInstalled) return;
+  gateFetchInterceptorInstalled = true;
+  const original = window.fetch.bind(window);
+  window.fetch = async (input, init) => {
+    let url = "";
+    try {
+      url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+    } catch {
+      url = "";
+    }
+    const isApiCall = url.startsWith(API_BASE);
+    const res = await original(
+      input,
+      isApiCall && init?.credentials === undefined
+        ? { ...init, credentials: "include" as RequestCredentials }
+        : init,
+    );
+    try {
+      if (
+        isApiCall &&
+        res.status === 401 &&
+        !url.includes("/gate/")
+      ) {
+        window.dispatchEvent(new Event(GATE_BOUNCE_EVENT));
+      }
+    } catch {
+      /* the bounce hook must never break the app */
+    }
+    return res;
+  };
+}
+
+type GatePhase = "checking" | "gate" | "app";
+
+export function App() {
+  const [phase, setPhase] = useState<GatePhase>("checking");
+
+  useEffect(() => {
+    installGateFetchInterceptor();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/gate/status`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<{ enabled: boolean; authenticated: boolean }>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setPhase(data.enabled && !data.authenticated ? "gate" : "app");
+      })
+      .catch(() => {
+        // Status unreachable (API down, old API build): fall back to a
+        // normal boot — the dashboard's own error states take over.
+        if (!cancelled) setPhase("app");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Session died mid-visit: re-check status before bouncing, so a
+  // stray 401 with the gate OFF can never trap the user on a gate
+  // screen that would only 403.
+  useEffect(() => {
+    const onBounce = () => {
+      fetch(`${API_BASE}/gate/status`)
+        .then((res) =>
+          res.ok
+            ? (res.json() as Promise<{ enabled: boolean; authenticated: boolean }>)
+            : null,
+        )
+        .then((data) => {
+          if (data && data.enabled && !data.authenticated) setPhase("gate");
+        })
+        .catch(() => {
+          /* keep the dashboard; its own states surface the problem */
+        });
+    };
+    window.addEventListener(GATE_BOUNCE_EVENT, onBounce);
+    return () => window.removeEventListener(GATE_BOUNCE_EVENT, onBounce);
+  }, []);
+
+  if (phase === "checking") {
+    return (
+      <main className="gate-wrap">
+        <div className="gate-card">
+          <div className="gate-logo-text" aria-hidden="true">
+            PM
+          </div>
+          <h1 className="gate-title">Prediction Markets Assistant</h1>
+          <p className="gate-copy">Loading…</p>
+        </div>
+      </main>
+    );
+  }
+  if (phase === "gate") {
+    return (
+      <GateScreen apiBase={API_BASE} onAuthenticated={() => setPhase("app")} />
+    );
+  }
+  return <Dashboard />;
 }

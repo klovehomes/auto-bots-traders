@@ -143,6 +143,22 @@ export interface SleeveToggles {
   polymarket: boolean;
 }
 
+/**
+ * Phase PM6 — whether one sleeve can REALLY trade in the current run
+ * mode. Computed server-side (the API is the single source of truth)
+ * from the stored run mode and which broker configurations are
+ * present — never from anything the browser claims. `reason` is a
+ * short human explanation when the sleeve is unavailable; null when
+ * it is available. An unavailable sleeve KEEPS its stored on/off
+ * preference: availability only means the preference can't be
+ * changed, and can't take effect, in this mode.
+ */
+export interface SleeveAvailability {
+  sleeve: keyof SleeveToggles;
+  available: boolean;
+  reason: string | null;
+}
+
 /** One user selection booked from the left (scan) panel on Submit. */
 export interface UserSelection {
   id: string;
@@ -193,4 +209,16 @@ export interface AllocationState {
   remainingAvailable: number;
   sleeveToggles: SleeveToggles;
   userSelections: UserSelection[];
+  /** Phase PM6: the stored run mode the availability below was
+   *  computed for (the API-owned desired mode). */
+  runMode: FleetMode;
+  /** Phase PM6: per-sleeve availability in `runMode`, in UI order
+   *  (crypto, kalshi, polymarket). */
+  sleeveAvailability: SleeveAvailability[];
+  /** Phase PM6: false when NO sleeve can trade in `runMode` — the
+   *  Bot Allocation control is greyed out too. */
+  botAllocationAvailable: boolean;
+  /** Phase PM6: why the Bot Allocation control is unavailable
+   *  (one-line summary of the blockers); null when available. */
+  botAllocationReason: string | null;
 }

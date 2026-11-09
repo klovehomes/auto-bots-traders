@@ -33,6 +33,28 @@ services:
       # Bot Trades allocation, sleeve toggles, booked user selections —
       # on the same shared volume, following the control-state pattern.
       ALLOCATIONS_STATE_PATH: /data/allocations.json
+      # Phase PM6 (sleeve availability): PRESENCE ONLY. The API never
+      # calls Alpaca or Kalshi — it checks whether these are non-empty
+      # so GET /allocations can grey out Bot Trades sleeves that can't
+      # really trade in the current run mode, with the reason. The
+      # values themselves stay in .env and are never served or logged.
+      ALPACA_API_KEY: ${ALPACA_API_KEY:-}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
+      KALSHI_API_KEY_ID: ${KALSHI_API_KEY_ID:-}
+      KALSHI_PRIVATE_KEY: ${KALSHI_PRIVATE_KEY:-}
+      # Phase PM7 (email gate): OFF unless GATE_ENABLED=true in .env.
+      # The gate DB lives on the same fleet-data volume as the other
+      # state files. RESEND_API_KEY/MAIL_FROM are read by the API to
+      # email activation codes (values never served or logged); with
+      # no key the gate runs in dev mode and returns codes in the
+      # register response. GATE_COOKIE_SECURE stays false while the
+      # dashboard is plain http (Tailscale) — see .env.example.
+      GATE_ENABLED: ${GATE_ENABLED:-false}
+      GATE_SESSION_SECRET: ${GATE_SESSION_SECRET:-}
+      GATE_STATE_PATH: /data/gate-state.json
+      GATE_COOKIE_SECURE: ${GATE_COOKIE_SECURE:-false}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-}
     volumes:
       # Bot definitions live outside the app image; mounted read-only.
       - ../bots:/bots:ro

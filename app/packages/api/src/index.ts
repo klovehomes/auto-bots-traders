@@ -20,6 +20,18 @@ import { ModeStore } from "./mode.js";
 import { EventHistoryStore } from "./history.js";
 import { ScanService } from "./gamma.js";
 import { AllocationStore } from "./allocations.js";
+import { computeAvailability } from "./availability.js";
+import {
+  GateStore,
+  generateCode,
+  makeSessionCookie,
+  normalizeEmail,
+  parseCookies,
+  readSessionValue,
+  sendActivationCode,
+  sha256Hex,
+  GATE_COOKIE_NAME,
+} from "./gate.js";
 import type {
   AllocationState,
   SleeveToggles,
@@ -70,6 +82,72 @@ const EVENT_HISTORY_PATH =
  */
 const ALLOCATIONS_STATE_PATH =
   process.env.ALLOCATIONS_STATE_PATH ?? "./data/allocations.json";
+/**
+ * Phase PM7 — the email activation-code gate (see gate.ts). OFF
+ * unless GATE_ENABLED=true: with the gate off this service behaves
+ * exactly as it always has. When on, every route except /gate/* and
+ * the token-guarded /internal/* requires a valid pm_session cookie.
+ * The gate DB (registrations + code hashes + rate events) lives at
+ * GATE_STATE_PATH — in Docker, /data/gate-state.json on the same
+ * fleet-data volume as the control/mode/history state, so Keith's
+ * registration list is inside his own deployment, not a third party.
+ */
+function envTrue(value: string | undefined): boolean {
+  return (value ?? "").trim().toLowerCase() === "true";
+}
+const GATE_ENABLED = envTrue(process.env.GATE_ENABLED);
+const GATE_STATE_PATH =
+  process.env.GATE_STATE_PATH ?? "./data/gate-state.json";
+/**
+ * HMAC secret for the session cookie. Must be set (random, long) when
+ * the gate is enabled — the fallback only keeps local dev runs from
+ * wedging and is called out loudly at boot + in PHASE-PM7-DELIVERY.md.
+ */
+const GATE_SESSION_SECRET =
+  (process.env.GATE_SESSION_SECRET ?? "").trim() ||
+  "dev-insecure-gate-secret";
+/**
+ * Secure attribute on the session cookie. OFF by default: the VM
+ * dashboard is served over plain http on Tailscale, and a Secure
+ * cookie would never be sent back by the browser there. Set
+ * GATE_COOKIE_SECURE=true only behind a real HTTPS deployment.
+ */
+const GATE_COOKIE_SECURE = envTrue(process.env.GATE_COOKIE_SECURE);
+/** Resend presence (booleans only in logs; values never served). */
+const RESEND_CONFIGURED =
+  typeof process.env.RESEND_API_KEY === "string" &&
+  process.env.RESEND_API_KEY.trim().length > 0;
+const GATE_MAIL = {
+  resendApiKey: process.env.RESEND_API_KEY ?? "",
+  mailFrom: process.env.MAIL_FROM ?? "",
+};
+/**
+ * Phase PM6 — broker configuration PRESENCE, booleans only. The API
+ * never calls Alpaca or Kalshi; it checks whether credentials are
+ * set (values are never read beyond non-emptiness, never logged,
+ * never served) so GET /allocations can label Bot Trades sleeve
+ * availability truthfully for the current run mode. Docker passes
+ * the .env values through to this service for exactly this check
+ * (see docker-compose.yml).
+ *
+ * Kalshi credential names: the true-paper phase has not defined any
+ * yet — no Kalshi runner exists in this build — so these are the
+ * names that phase will use, checked now so the availability label
+ * flips from "isn't connected" to "runner isn't built" the day the
+ * credentials land. Kalshi's API authenticates with a key ID plus an
+ * RSA private key (PEM contents or a path to the key file).
+ */
+function envConfigured(value: string | undefined): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+const ALPACA_KEYS_PRESENT =
+  envConfigured(process.env.ALPACA_API_KEY) &&
+  envConfigured(process.env.ALPACA_API_SECRET);
+const KALSHI_CREDS_PRESENT =
+  envConfigured(process.env.KALSHI_API_KEY_ID) &&
+  (envConfigured(process.env.KALSHI_PRIVATE_KEY) ||
+    envConfigured(process.env.KALSHI_PRIVATE_KEY_PATH) ||
+    envConfigured(process.env.KALSHI_API_KEY));
 /** PolyCrypt9000's starting book (matches fleetState START_EQUITY). */
 const START_EQUITY = 10000;
 /** How long a kill-liquidate POST waits for the engine's report before
@@ -80,7 +158,14 @@ const LIQUIDATION_WAIT_MS = 10_000;
 async function main(): Promise<void> {
   const app = Fastify({ logger: true });
 
-  await app.register(cors, { origin: UI_URL ? [UI_URL] : true });
+  // credentials: true (PM7) — the dashboard's fetches carry the
+  // pm_session cookie cross-origin (web :4173 → api :8080) when the
+  // gate is on; the origin stays pinned to UI_URL when set, and is
+  // reflected (a specific origin, never "*") when not.
+  await app.register(cors, {
+    origin: UI_URL ? [UI_URL] : true,
+    credentials: true,
+  });
   if (UI_URL) app.log.info(`CORS allowlist: ${UI_URL} (UI_URL)`);
   await app.register(websocket);
 
@@ -128,6 +213,60 @@ async function main(): Promise<void> {
   const scanService = new ScanService();
   const allocationStore = new AllocationStore(ALLOCATIONS_STATE_PATH);
   app.log.info(`allocations: ${ALLOCATIONS_STATE_PATH}`);
+  app.log.info(
+    `broker config presence (PM6 sleeve availability): ` +
+      `alpaca paper keys ${ALPACA_KEYS_PRESENT ? "configured" : "absent"}, ` +
+      `kalshi demo creds ${KALSHI_CREDS_PRESENT ? "configured" : "absent"}`,
+  );
+
+  // Phase PM7: the email gate. The store is only opened when the
+  // gate is enabled — with GATE_ENABLED unset/false nothing about
+  // this service's behavior changes.
+  const gateStore = GATE_ENABLED ? new GateStore(GATE_STATE_PATH) : null;
+  if (GATE_ENABLED) {
+    app.log.info(
+      `email gate: ENABLED (state: ${GATE_STATE_PATH}, ` +
+        `${gateStore!.listRegistrations().length} registrations)`,
+    );
+    app.log.info(
+      `email gate mail: ${
+        RESEND_CONFIGURED
+          ? "Resend configured — codes are emailed"
+          : "DEV MODE — no RESEND_API_KEY, codes are returned in the register response"
+      }`,
+    );
+    if (!(process.env.GATE_SESSION_SECRET ?? "").trim()) {
+      app.log.warn(
+        "email gate: GATE_SESSION_SECRET is not set — using the insecure " +
+          "dev fallback. Set a random GATE_SESSION_SECRET in app/.env before " +
+          "real use.",
+      );
+    }
+  } else {
+    app.log.info("email gate: disabled (GATE_ENABLED is not true)");
+  }
+
+  /** Session for this request, or null. Only meaningful when the
+   *  gate is enabled; never reads anything but the pm_session cookie. */
+  function gateSession(request: { headers: Record<string, unknown> }) {
+    const header = request.headers["cookie"];
+    const cookies = parseCookies(typeof header === "string" ? header : undefined);
+    return readSessionValue(cookies[GATE_COOKIE_NAME], GATE_SESSION_SECRET);
+  }
+
+  // The gate guard. Registered after CORS so preflight requests are
+  // answered by the CORS plugin first. Exempt: /gate/* (it IS the
+  // gate) and /internal/* (engine-facing, INTERNAL_EVENT_TOKEN
+  // guarded exactly as before — the engine never carries a cookie).
+  // Everything else — reads, control/kill, mode, scans, allocations,
+  // and the /events WebSocket upgrade — needs a valid session.
+  app.addHook("onRequest", async (request, reply) => {
+    if (!GATE_ENABLED) return;
+    const path = request.url.split("?")[0]!;
+    if (path.startsWith("/gate/") || path.startsWith("/internal/")) return;
+    if (gateSession(request)) return;
+    return reply.code(401).send({ ok: false, error: "unauthorized" });
+  });
 
   const round2 = (n: number): number => Math.round(n * 100) / 100;
 
@@ -155,6 +294,16 @@ async function main(): Promise<void> {
     const total = totalFunds();
     const ledger = allocationStore.ledger;
     const selectionsTotal = allocationStore.openSelectionsTotal();
+    // Phase PM6: availability for the CURRENT stored run mode — the
+    // API-owned desired mode, the same source the dashboard mode
+    // switch uses (stored choice beats the MODE env). Computed per
+    // request, so a mode flip is reflected on the panel's next
+    // /allocations fetch — never stale.
+    const runMode = modeStore.desiredMode();
+    const availability = computeAvailability(runMode, {
+      alpacaKeysPresent: ALPACA_KEYS_PRESENT,
+      kalshiCredsPresent: KALSHI_CREDS_PRESENT,
+    });
     return {
       totalFunds: total,
       botAllocation: ledger.botAllocation,
@@ -162,6 +311,10 @@ async function main(): Promise<void> {
       remainingAvailable: round2(total - ledger.botAllocation - selectionsTotal),
       sleeveToggles: ledger.sleeveToggles,
       userSelections: ledger.userSelections,
+      runMode,
+      sleeveAvailability: availability.sleeves,
+      botAllocationAvailable: availability.botAllocationAvailable,
+      botAllocationReason: availability.botAllocationReason,
     };
   }
 
@@ -202,6 +355,68 @@ async function main(): Promise<void> {
       state: modeStore.publicState(),
     });
   }
+
+  // --- Phase PM7: email gate endpoints --------------------------------
+  // Public by design (they ARE the gate) — exempt from the session
+  // guard above. Response shapes mirror the v17 showcase gate.
+
+  app.get("/gate/status", async (request) => ({
+    enabled: GATE_ENABLED,
+    authenticated: GATE_ENABLED ? gateSession(request) !== null : false,
+  }));
+
+  app.post("/gate/register", async (request, reply) => {
+    if (!GATE_ENABLED || !gateStore) {
+      return reply.code(403).send({ ok: false, error: "gate_disabled" });
+    }
+    const body = request.body as { email?: unknown } | null;
+    const email = normalizeEmail(body?.email);
+    if (!email) {
+      return reply.code(400).send({ ok: false, error: "invalid_email" });
+    }
+    const now = Date.now();
+    if (!gateStore.checkAndRecordRegister(email, request.ip, now)) {
+      return reply.code(429).send({ ok: false, error: "rate_limited" });
+    }
+    const code = generateCode();
+    gateStore.registerWithCode(email, sha256Hex(code), now);
+    let dev = false;
+    try {
+      dev = (await sendActivationCode(GATE_MAIL, email, code)).dev;
+    } catch (err) {
+      // Mail delivery problems (e.g. Resend domain not yet verified)
+      // must not leak account state; the visitor simply never gets a
+      // code and can retry. The failure is loud in the API log.
+      app.log.error(`[gate] activation email to ${email} failed: ${String(err)}`);
+    }
+    // Deliberately generic — never reveals whether the address was
+    // already registered. dev_code appears ONLY in dev mode (no
+    // RESEND_API_KEY configured); with a key set it cannot appear.
+    const payload: { ok: true; dev_code?: string } = { ok: true };
+    if (dev) payload.dev_code = code;
+    return payload;
+  });
+
+  app.post("/gate/verify", async (request, reply) => {
+    if (!GATE_ENABLED || !gateStore) {
+      return reply.code(403).send({ ok: false, error: "gate_disabled" });
+    }
+    // Every failure is the same uniform 401 (v17 posture).
+    const fail = () =>
+      reply.code(401).send({ ok: false, error: "invalid_code" });
+    const body = request.body as { email?: unknown; code?: unknown } | null;
+    const email = normalizeEmail(body?.email);
+    const code =
+      typeof body?.code === "string" ? body.code.trim() : "";
+    if (!email || !/^\d{6}$/.test(code)) return fail();
+    const outcome = gateStore.verify(email, code, Date.now());
+    if (!outcome.ok) return fail();
+    reply.header(
+      "Set-Cookie",
+      makeSessionCookie(email, GATE_SESSION_SECRET, GATE_COOKIE_SECURE),
+    );
+    return { ok: true };
+  });
 
   app.get("/health", async () => ({ ok: true, mode: MODE }));
 

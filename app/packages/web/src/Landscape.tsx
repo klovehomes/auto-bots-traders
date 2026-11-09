@@ -15,6 +15,49 @@ export interface EffectEvent {
   ts: number;
 }
 
+/**
+ * ONE flash record per building — the single source of truth for an
+ * event pulse. It is created exactly once, from the triggering event
+ * (win → green, loss → red, open → the bot's own color), and every
+ * pulsing surface for that building — satellite beam, dish glow, dish
+ * ring, ground-glow pool, and the base shockwaves — derives its color
+ * from this record. Nothing else computes a pulse color.
+ */
+export interface BuildingFlash {
+  color: THREE.Color;
+  startedAt: number;
+  strength: number;
+}
+
+/** How long one event flash lives, in ms (the standing ~1 s decay). */
+export const FLASH_DURATION_MS = 1000;
+
+/** Build the flash record for one triggering event. Pure: the caller
+ *  supplies the timestamp so tests can drive it deterministically. */
+export function flashForEvent(
+  kind: EffectEvent["kind"],
+  botColor: THREE.Color,
+  startedAt: number,
+): BuildingFlash {
+  if (kind === "win") return { color: GREEN.clone(), startedAt, strength: 0.95 };
+  if (kind === "loss") return { color: RED.clone(), startedAt, strength: 0.95 };
+  return { color: botColor.clone(), startedAt, strength: 0.45 };
+}
+
+/** The pulse to render for a flash at `now`: its ONE color, its decay
+ *  progress (0 → 1 over FLASH_DURATION_MS), and its live intensity.
+ *  Returns null once the flash has expired (or if there is none). */
+export function flashPulseAt(
+  flash: BuildingFlash | null,
+  now: number,
+): { color: THREE.Color; progress: number; intensity: number } | null {
+  if (!flash) return null;
+  const age = Math.max(0, now - flash.startedAt);
+  if (age >= FLASH_DURATION_MS) return null;
+  const progress = age / FLASH_DURATION_MS;
+  return { color: flash.color, progress, intensity: (1 - progress) * flash.strength };
+}
+
 interface LandscapeProps {
   bots: BotConfig[];
   statsRef: { current: Map<string, BotStats> };
@@ -429,9 +472,11 @@ interface BuildingObj {
   currentH: number;
   targetH: number;
   phase: number;
-  flashColor: THREE.Color | null;
-  flashT0: number;
-  flashStrength: number;
+  /** The building's ONE event flash. The dish beam, dish glow, dish
+   *  ring, ground pool, and base shockwaves all take their pulse color
+   *  from this record — it is set exactly once per triggering event in
+   *  handleEffect and never recomputed anywhere else. */
+  flash: BuildingFlash | null;
   nodes: Map<string, NodeObj>;
 }
 
@@ -444,6 +489,9 @@ interface NodeObj {
 }
 
 interface Shock {
+  /** Owning building — a new flash for the same building clears its
+   *  previous shockwaves before they can show a stale color. */
+  botName: string;
   mesh: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   t0: number;
   dur: number;
@@ -1095,9 +1143,7 @@ export function Landscape({
         currentH: BASE_TOWER_H,
         targetH: BASE_TOWER_H,
         phase: Math.random() * Math.PI * 2,
-        flashColor: null,
-        flashT0: 0,
-        flashStrength: 0,
+        flash: null,
         nodes: new Map(),
       };
       buildings.push(obj);
@@ -1280,7 +1326,7 @@ export function Landscape({
     const bursts: Burst[] = [];
     const flares: Flare[] = [];
 
-    function spawnShock(pos: THREE.Vector3, color: THREE.Color, maxScale: number, dur: number): void {
+    function spawnShock(botName: string, pos: THREE.Vector3, color: THREE.Color, maxScale: number, dur: number): void {
       const mat = new THREE.MeshBasicMaterial({
         color,
         transparent: true,
@@ -1293,7 +1339,22 @@ export function Landscape({
       mesh.rotation.x = -Math.PI / 2;
       mesh.position.set(pos.x, 0.12, pos.z);
       scene.add(mesh);
-      shocks.push({ mesh, t0: performance.now(), dur, maxScale });
+      shocks.push({ botName, mesh, t0: performance.now(), dur, maxScale });
+    }
+
+    /** Remove a building's live shockwaves. Called the moment a new
+     *  flash replaces the old one, so a shockwave spawned by a previous
+     *  event can never keep expanding at the base in the previous
+     *  event's color while the beam and pool have moved on. */
+    function clearShocksFor(botName: string): void {
+      for (let i = shocks.length - 1; i >= 0; i--) {
+        if (shocks[i]!.botName !== botName) continue;
+        const s = shocks[i]!;
+        scene.remove(s.mesh);
+        s.mesh.geometry.dispose();
+        s.mesh.material.dispose();
+        shocks.splice(i, 1);
+      }
     }
 
     function spawnBurst(pos: THREE.Vector3, y: number, color: THREE.Color, rising: boolean): void {
@@ -1345,25 +1406,29 @@ export function Landscape({
       const b = buildingByName.get(effect.bot);
       if (!b) return;
       const topY = PLINTH_TOP + b.currentH + 1.1;
+      // ONE flash record for this event, set exactly once — the beam,
+      // dish glow/ring, ground pool, and the base shockwaves below all
+      // take their color from it. The building's previous shockwaves
+      // are cleared in the same step, before the next frame renders,
+      // so no surface at the base can still be showing the previous
+      // event's color. (Previously the shockwaves were a second,
+      // independent color path: they kept their spawn color for their
+      // own 650–1100 ms lifetimes — and a win spawned a CYAN shockwave
+      // under a GREEN beam — so the base could visibly disagree with
+      // the beam, especially when events landed back-to-back.)
+      const flash = flashForEvent(effect.kind, b.baseColor, performance.now());
+      b.flash = flash;
+      clearShocksFor(b.bot.name);
       if (effect.kind === "win") {
-        spawnShock(b.pos, GREEN, 5.6, 1100);
-        spawnShock(b.pos, CYAN, 3.8, 850);
-        spawnBurst(b.pos, topY, new THREE.Color("#3ff5c8"), true);
-        b.flashColor = GREEN.clone();
-        b.flashStrength = 0.95;
-        b.flashT0 = performance.now();
+        spawnShock(b.bot.name, b.pos, flash.color, 5.6, FLASH_DURATION_MS);
+        spawnShock(b.bot.name, b.pos, flash.color, 3.8, FLASH_DURATION_MS);
+        spawnBurst(b.pos, topY, flash.color, true);
       } else if (effect.kind === "loss") {
         spawnFlare(b.pos, topY);
-        spawnShock(b.pos, RED, 2.8, 800);
-        spawnBurst(b.pos, topY, new THREE.Color("#ff6a55"), false);
-        b.flashColor = RED.clone();
-        b.flashStrength = 0.95;
-        b.flashT0 = performance.now();
+        spawnShock(b.bot.name, b.pos, flash.color, 2.8, FLASH_DURATION_MS);
+        spawnBurst(b.pos, topY, flash.color, false);
       } else {
-        spawnShock(b.pos, b.baseColor, 2.0, 650);
-        b.flashColor = b.baseColor.clone();
-        b.flashStrength = 0.45;
-        b.flashT0 = performance.now();
+        spawnShock(b.bot.name, b.pos, flash.color, 2.0, FLASH_DURATION_MS);
       }
     }
 
@@ -1524,7 +1589,10 @@ export function Landscape({
         if (b.visual.halted !== halted) {
           b.visual.halted = halted;
           b.applyScreen();
-          if (halted) b.flashColor = null;
+          if (halted) {
+            b.flash = null;
+            clearShocksFor(b.bot.name);
+          }
         }
         b.facadeMat.color.lerp(halted ? FACADE_DIM : FACADE_FULL, 0.07);
 
@@ -1541,34 +1609,29 @@ export function Landscape({
         const targetRingOpacity = halted ? 0.9 : 0.5 + Math.abs(norm) * 0.45;
         b.ringMat.opacity += (targetRingOpacity - b.ringMat.opacity) * 0.08;
 
-        // Dish sky pulse + ground glow pool: on a close event BOTH fire
-        // from the same flash state (same color, same strength, same
-        // 1 s decay) — beam, expanding ring, and glow at the dish up
-        // top; light pool on the ground beneath. Idle: no beam at all.
-        let flashK = 0;
-        let flashProgress = 0;
-        if (b.flashColor) {
-          const age = now - b.flashT0;
-          const dur = 1000;
-          if (age < dur) {
-            flashProgress = age / dur;
-            flashK = (1 - flashProgress) * b.flashStrength;
-          } else {
-            b.flashColor = null;
-          }
-        }
-        if (b.flashColor && flashK > 0 && !halted) {
-          b.beamMat.color.copy(b.flashColor);
+        // Dish sky pulse + ground glow pool: on an event BOTH fire
+        // from the building's ONE flash record (same color, same
+        // strength, same 1 s decay) — beam, expanding ring, and glow
+        // at the dish up top; light pool on the ground beneath. Every
+        // surface copies the pulse color from that record on every
+        // frame; no surface keeps or recomputes its own pulse color.
+        // Idle: no beam at all.
+        const pulse = flashPulseAt(b.flash, now);
+        if (b.flash && !pulse) b.flash = null;
+        const flashK = pulse ? pulse.intensity : 0;
+        const flashProgress = pulse ? pulse.progress : 0;
+        if (pulse && flashK > 0 && !halted) {
+          b.beamMat.color.copy(pulse.color);
           b.beamMat.opacity = flashK * 0.8;
-          b.dishGlow.material.color.copy(b.flashColor);
+          b.dishGlow.material.color.copy(pulse.color);
           b.dishGlow.material.opacity = flashK * 0.95;
           const glowScale = 2.6 + flashProgress * 1.9;
           b.dishGlow.scale.set(glowScale, glowScale, 1);
-          b.dishRing.material.color.copy(b.flashColor);
+          b.dishRing.material.color.copy(pulse.color);
           b.dishRing.material.opacity = flashK * 0.65;
           const ringScale = 0.7 + flashProgress * 2.6;
           b.dishRing.scale.set(ringScale, ringScale, 1);
-          b.groundGlow.material.color.copy(b.flashColor);
+          b.groundGlow.material.color.copy(pulse.color);
           b.groundGlow.material.opacity = 0.1 + flashK * 0.55;
           const swell = 5.6 + flashProgress * 2.2;
           b.groundGlow.scale.set(swell, swell, 1);
