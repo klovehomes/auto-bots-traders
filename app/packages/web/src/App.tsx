@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { BotConfig, FleetEvent, FleetMode } from "@fleet/shared/types";
+import type {
+  BotConfig,
+  FleetEvent,
+  FleetMode,
+  MarketWeather,
+} from "@fleet/shared/types";
 import {
   Landscape,
   type EffectEvent,
@@ -85,6 +90,13 @@ interface ModeMessage {
   kind: "mode";
   ts: string;
   state: ModeState;
+}
+
+// --- Market weather (v24, owned by the API — GET /weather) -----------
+interface WeatherMessage {
+  kind: "weather";
+  ts: string;
+  state: MarketWeather | null;
 }
 
 // --- Paper keys status (Phase 12 — GET /keys/status, presence only) --
@@ -219,6 +231,10 @@ export function App() {
   const [modeState, setModeState] = useState<ModeState | null>(null);
   // Paper keys readout (Phase 12): presence only, from GET /keys/status.
   const [keysStatus, setKeysStatus] = useState<KeysStatus | null>(null);
+  // Market weather (v24): the engine's SPY verdict via the API. Drives
+  // the dome's particle weather (through weatherRef, read per frame)
+  // and the overlay chip on the landscape.
+  const [weather, setWeather] = useState<MarketWeather | null>(null);
   // A mode the user picked in the dropdown but hasn't confirmed yet.
   const [modeChoice, setModeChoice] = useState<FleetMode | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
@@ -276,6 +292,8 @@ export function App() {
   const inspectControlRef = useRef<InspectControl | null>(null);
   /** Bot NAMES currently halted — the landscape reads this every frame. */
   const haltedRef = useRef<Set<string>>(new Set());
+  /** Latest market weather — the landscape reads this every frame. */
+  const weatherRef = useRef<MarketWeather | null>(null);
 
   function dismissInspect(): void {
     inspectControlRef.current?.dismiss();
@@ -319,6 +337,10 @@ export function App() {
   useEffect(() => {
     haltedRef.current = haltedNames;
   }, [haltedNames]);
+
+  useEffect(() => {
+    weatherRef.current = weather;
+  }, [weather]);
 
   /**
    * After a Reset All Data (v22) the API's history restarts its
@@ -519,6 +541,28 @@ export function App() {
     };
   }, []);
 
+  // Market weather (v24): fetched once from GET /weather so a fresh
+  // dashboard shows the right sky immediately, then kept live by the
+  // WebSocket "weather" broadcasts (the engine re-judges hourly).
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/weather`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<MarketWeather | null>;
+      })
+      .then((data) => {
+        if (!cancelled) setWeather(data);
+      })
+      .catch(() => {
+        // Best-effort: the dome keeps its calm default until a
+        // broadcast or a later load delivers the weather.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Paper keys status (Phase 12): fetched once on load, refreshed on
   // an interval — flipping keys means editing a file on the host, and
   // the readout should notice without a dashboard reload. Presence
@@ -654,7 +698,12 @@ export function App() {
         const parsed = JSON.parse(String(message.data)) as
           | FleetEvent
           | ControlMessage
-          | ModeMessage;
+          | ModeMessage
+          | WeatherMessage;
+        if ((parsed as WeatherMessage).kind === "weather") {
+          setWeather((parsed as WeatherMessage).state);
+          return;
+        }
         if ((parsed as ControlMessage).kind === "control") {
           const msg = parsed as ControlMessage;
           setControl(msg.state);
@@ -1011,6 +1060,7 @@ export function App() {
               statsRef={statsRef}
               effectsRef={effectsRef}
               haltedRef={haltedRef}
+              weatherRef={weatherRef}
               onUnavailable={() => setWebglFailed(true)}
               onInspect={(name, pinned) =>
                 setInspect(name ? { name, pinned } : null)
@@ -1018,6 +1068,19 @@ export function App() {
               inspectAnchorRef={inspectAnchorRef}
               inspectControlRef={inspectControlRef}
             />
+          )}
+          {weather && (
+            <div
+              className={`weather-chip ${weather.kind}`}
+              title={`SPY weather as of ${fmtTimeFull(weather.asOf)} (${weather.source === "alpaca" ? "Alpaca paper feed" : "simulator"})`}
+            >
+              {weather.kind === "breakout"
+                ? "✦ Breakout weather"
+                : "☄ Downturn weather"}
+              {" · SPY "}
+              {weather.spyChangePct >= 0 ? "+" : "-"}
+              {Math.abs(weather.spyChangePct).toFixed(2)}%
+            </div>
           )}
         </section>
       ) : (

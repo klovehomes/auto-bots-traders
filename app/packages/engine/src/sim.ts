@@ -168,10 +168,20 @@ function stringList(value: unknown): string[] {
   return value.filter((v): v is string => typeof v === "string");
 }
 
+/**
+ * Market probe (v24): the simulator fills this with a getter for its
+ * live SPY price so the engine's weather service can judge the sim
+ * day (breakout vs downturn) from the same series the bots trade on.
+ */
+export interface SimSpyProbe {
+  current: (() => number) | null;
+}
+
 export function startSimulator(
   bots: BotConfig[],
   post: (event: FleetEvent) => Promise<void>,
   control?: SimControl,
+  spyProbe?: SimSpyProbe,
 ): void {
   const rng = mulberry32(0x5eed);
   const prices = new Map<string, PriceSeries>();
@@ -190,6 +200,9 @@ export function startSimulator(
   };
   // Pre-warm the whole book so walks run before the first trade.
   for (const key of Object.keys(START_PRICES)) series(key);
+
+  // Market weather probe (v24): expose the live SPY walk.
+  if (spyProbe) spyProbe.current = () => series("SPY").price;
 
   const stepPrices = (): void => {
     for (const s of prices.values()) {

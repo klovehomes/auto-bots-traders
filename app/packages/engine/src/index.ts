@@ -20,9 +20,10 @@ import { createKalshiClient } from "./kalshi.js";
 import { createModeSupervisor, resolveBootMode } from "./mode.js";
 import { createControlRouter, startPaperTrader } from "./paper.js";
 import { startPolyCryptTrader } from "./polycrypt.js";
-import { startSimulator } from "./sim.js";
+import { startSimulator, type SimSpyProbe } from "./sim.js";
 import { startSnapbackTrader } from "./snapback.js";
 import { startVegaTrader } from "./vega.js";
+import { startWeatherService } from "./weather.js";
 import { startWesleyTrader } from "./wesley.js";
 
 const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:8080";
@@ -135,6 +136,25 @@ async function main(): Promise<void> {
   const rotation = bots.filter((b) => b.enabled);
   const active = rotation.length > 0 ? rotation : bots;
 
+  // Market weather (v24): whichever simulator ends up running fills
+  // this probe with its live SPY price; the weather service judges
+  // the day from it when no Alpaca client exists. Started exactly
+  // once per boot, by whichever branch knows its data source first.
+  const simSpyProbe: SimSpyProbe = { current: null };
+  let weatherStarted = false;
+  const startWeather = (
+    client: Parameters<typeof startWeatherService>[0]["client"],
+  ): void => {
+    if (weatherStarted) return;
+    weatherStarted = true;
+    startWeatherService({
+      client,
+      simSpy: simSpyProbe,
+      apiBaseUrl: API_BASE_URL,
+      token: INTERNAL_EVENT_TOKEN,
+    });
+  };
+
   // Mode supervisor (Phase 5): watches the control poll for the
   // dashboard switch's desired mode and restarts this process into a
   // changed mode (Docker's restart policy does the relaunch); also
@@ -183,7 +203,8 @@ async function main(): Promise<void> {
   if (mode === "sim") {
     // Local fake-data mode: no broker, no keys, no real market data.
     console.log("[engine] MODE=sim — synthetic market data, no broker connected.");
-    startSimulator(active, postEvent, control);
+    startSimulator(active, postEvent, control, simSpyProbe);
+    startWeather(null);
     return;
   }
 
@@ -197,6 +218,8 @@ async function main(): Promise<void> {
         "running in paper-check behavior only",
     );
     await checkAlpacaPaperConnection();
+    // Weather still reads the paper feed (display only, no orders).
+    startWeather(createAlpacaClient());
     startTestEmitter(active);
     return;
   }
@@ -223,6 +246,11 @@ async function main(): Promise<void> {
     active.find((b) => b.codename === codename);
   const alpacaClient = createAlpacaClient();
   const kalshiClient = createKalshiClient();
+
+  // Market weather (v24): real SPY through the paper client when one
+  // exists. If there is no Alpaca client (Kalshi-only keys), the
+  // simulator-fallback branch below starts the sim-sourced service.
+  if (alpacaClient) startWeather(alpacaClient);
 
   /**
    * Paper was requested but this bot has no venue: leave ONE clear
@@ -292,7 +320,10 @@ async function main(): Promise<void> {
     }
     const others = active.filter((b) => !running.includes(b.codename));
     if (others.length > 0) {
-      startSimulator(others, postEvent, router.forOthers(running));
+      startSimulator(others, postEvent, router.forOthers(running), simSpyProbe);
+      // Kalshi-only keys: no Alpaca client, so the dome's weather
+      // comes from the simulator's SPY walk (v24).
+      if (!alpacaClient) startWeather(null);
     }
   } else {
     // No keys at all: never fabricate a broker connection. Every bot
@@ -309,7 +340,8 @@ async function main(): Promise<void> {
         "paper keys not loaded — no Alpaca paper keys and no Kalshi demo keys were found in the keys file or environment.",
       );
     }
-    startSimulator(active, postEvent, control);
+    startSimulator(active, postEvent, control, simSpyProbe);
+    startWeather(null);
   }
 }
 

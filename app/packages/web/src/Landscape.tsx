@@ -1,7 +1,13 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
-import type { BotConfig } from "@fleet/shared/types";
-import { START_EQUITY, fmtMoney, momentumAt, type BotStats } from "./fleetState.js";
+import type { BotConfig, MarketWeather } from "@fleet/shared/types";
+import {
+  START_EQUITY,
+  fmtMoney,
+  momentumAt,
+  weatherModeFor,
+  type BotStats,
+} from "./fleetState.js";
 import {
   AVATAR_CHOICE_EVENT,
   getAvatarChoiceId,
@@ -23,6 +29,13 @@ interface LandscapeProps {
    *  mirrored by the App). Read every frame; a halted bot's building
    *  goes dark — HALTED plate, red-banded screen, red ground pool. */
   haltedRef?: { current: Set<string> };
+  /** Market weather (v24): the engine's SPY verdict, mirrored by the
+   *  App. Read every frame; it selects the particle weather inside
+   *  the hub dome (green sparklies vs red meteor shower) and its
+   *  intensity. Optional: surfaces that render the landscape without
+   *  a live engine (the public showcase) omit it and get the calm
+   *  default sky from weatherModeFor(null). */
+  weatherRef?: { current: MarketWeather | null };
   onUnavailable: () => void;
   /** Inspect dialog: called when the building under inspection changes
    *  (hover on desktop, tap on touch; `pinned` = opened by tap/click). */
@@ -67,6 +80,36 @@ const DOME_BLUE_DARK = new THREE.Color("#14489f");
 const DOME_BLUE_BRIGHT = new THREE.Color("#57b6ff");
 
 const HUB_POS = new THREE.Vector3(0, 0, -12);
+
+/**
+ * Market weather particles (v24) — population rules for the hub dome.
+ * Counts scale with weather intensity (calm day sparse, big day
+ * dense) inside fixed caps; small screens render 60% as many so
+ * phones keep their frame rate. Pure + exported for the harness.
+ */
+export const MAX_SPARKLES = 300;
+export const MAX_METEORS = 45;
+const SMALL_SCREEN_WEATHER_SCALE = 0.6;
+
+function clamp01(n: number): number {
+  return Math.min(1, Math.max(0, n));
+}
+
+export function sparkleCountFor(intensity: number, smallScreen = false): number {
+  const base = 150 + 150 * clamp01(intensity);
+  return Math.min(
+    MAX_SPARKLES,
+    Math.round(base * (smallScreen ? SMALL_SCREEN_WEATHER_SCALE : 1)),
+  );
+}
+
+export function meteorCountFor(intensity: number, smallScreen = false): number {
+  const base = 30 + 15 * clamp01(intensity);
+  return Math.min(
+    MAX_METEORS,
+    Math.round(base * (smallScreen ? SMALL_SCREEN_WEATHER_SCALE : 1)),
+  );
+}
 const PLINTH_TOP = 0.35;
 const BASE_TOWER_H = 3.9; // tower height when equity == START_EQUITY
 
@@ -496,6 +539,7 @@ export function Landscape({
   statsRef,
   effectsRef,
   haltedRef,
+  weatherRef,
   onUnavailable,
   onInspect,
   inspectAnchorRef,
@@ -641,18 +685,26 @@ export function Landscape({
     );
     hubTier2.position.y = 2.15 + 0.525;
     hubGroup.add(hubTier2);
+    // v24: the shell is modestly transparent (and writes no depth) so
+    // the market-weather particles INSIDE the dome read through it.
+    // The blue heartbeat pulse is untouched — it animates this same
+    // material's emissiveIntensity plus the band/glow below.
     const hubDomeMat = new THREE.MeshStandardMaterial({
       color: "#22262f",
       metalness: 0.9,
       roughness: 0.32,
       emissive: new THREE.Color("#1d4ed8"),
       emissiveIntensity: 0.1,
+      transparent: true,
+      opacity: 0.52,
+      depthWrite: false,
     });
     const hubDome = new THREE.Mesh(
       new THREE.SphereGeometry(2.2, 40, 20, 0, Math.PI * 2, 0, Math.PI / 2),
       hubDomeMat,
     );
     hubDome.position.y = 3.2;
+    hubDome.renderOrder = 2;
     hubGroup.add(hubDome);
     const hubDomeBandMat = new THREE.MeshBasicMaterial({ color: DOME_BLUE_BRIGHT.clone() });
     const hubDomeBand = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.08, 10, 48), hubDomeBandMat);
@@ -684,6 +736,235 @@ export function Landscape({
     const hubLight = new THREE.PointLight(0x3d8bff, 30, 52, 1.6);
     hubLight.position.set(HUB_POS.x, 5.2, HUB_POS.z);
     scene.add(hubLight);
+
+    // --- Market weather INSIDE the dome (v24) -------------------------
+    // Two preallocated particle systems live in the dome's volume
+    // (hub-local: the hemisphere shell above is SphereGeometry r=2.2
+    // centered at y=3.2, so the interior is the hemisphere of radius
+    // ~2.0 around (0, 3.2, 0)). Exactly one is visible at a time,
+    // chosen per frame from the App's weatherRef via weatherModeFor:
+    //   breakout → green sparklies drifting up, twinkling
+    //   downturn → red meteor shower streaking diagonally down
+    // Both update ONLY while active, allocate nothing per frame, and
+    // stay bounded inside the shell. Small screens run 60% counts.
+    const weatherSmallScreen =
+      container.clientWidth / Math.max(1, container.clientHeight) < 1;
+    const DOME_CENTER_Y = 3.2;
+    const DOME_INNER_R = 2.0;
+    const weatherRand = seededRandom(90210);
+    /** Disc radius available at height y inside the inner hemisphere. */
+    const domeRadiusAt = (y: number): number =>
+      Math.sqrt(Math.max(0.02, DOME_INNER_R * DOME_INNER_R - y * y));
+
+    // Breakout: green sparklies.
+    const sparklePos = new Float32Array(MAX_SPARKLES * 3);
+    const sparkleColor = new Float32Array(MAX_SPARKLES * 3);
+    const sparkleSpeed = new Float32Array(MAX_SPARKLES);
+    const sparklePhase = new Float32Array(MAX_SPARKLES);
+    const sparkleGreenA = new THREE.Color("#2fe89a");
+    const sparkleGreenB = new THREE.Color("#c8ffe9");
+    const sparkleTmpColor = new THREE.Color();
+    const placeSparkle = (i: number, y: number): void => {
+      const r = domeRadiusAt(y) * 0.92 * Math.sqrt(weatherRand());
+      const a = weatherRand() * Math.PI * 2;
+      sparklePos[i * 3] = Math.cos(a) * r;
+      sparklePos[i * 3 + 1] = y;
+      sparklePos[i * 3 + 2] = Math.sin(a) * r;
+    };
+    for (let i = 0; i < MAX_SPARKLES; i++) {
+      placeSparkle(i, 0.08 + weatherRand() * 1.85);
+      sparkleSpeed[i] = 0.14 + weatherRand() * 0.3;
+      sparklePhase[i] = weatherRand() * Math.PI * 2;
+      sparkleTmpColor
+        .copy(sparkleGreenA)
+        .lerp(sparkleGreenB, weatherRand() * 0.75);
+      sparkleColor[i * 3] = sparkleTmpColor.r;
+      sparkleColor[i * 3 + 1] = sparkleTmpColor.g;
+      sparkleColor[i * 3 + 2] = sparkleTmpColor.b;
+    }
+    const sparkleGeo = new THREE.BufferGeometry();
+    sparkleGeo.setAttribute("position", new THREE.BufferAttribute(sparklePos, 3));
+    sparkleGeo.setAttribute("color", new THREE.BufferAttribute(sparkleColor, 3));
+    const sparkleMat = new THREE.PointsMaterial({
+      size: 0.15,
+      map: glowTex,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      vertexColors: true,
+      sizeAttenuation: true,
+    });
+    const sparkles = new THREE.Points(sparkleGeo, sparkleMat);
+    sparkles.position.y = DOME_CENTER_Y;
+    sparkles.renderOrder = 3;
+    sparkles.frustumCulled = false;
+    hubGroup.add(sparkles);
+
+    // Downturn: mini red meteor shower. Each meteor is a 2-vertex
+    // streak (bright head → dark tail; additive blending turns the
+    // dark tail into a fade) plus a glowing head point.
+    const METEOR_TRAIL = 0.55;
+    const meteorLinePos = new Float32Array(MAX_METEORS * 2 * 3);
+    const meteorLineColor = new Float32Array(MAX_METEORS * 2 * 3);
+    const meteorHeadPos = new Float32Array(MAX_METEORS * 3);
+    const meteorDir = new Float32Array(MAX_METEORS * 3);
+    const meteorSpeed = new Float32Array(MAX_METEORS);
+    const meteorLife = new Float32Array(MAX_METEORS);
+    const meteorHeadColor = new THREE.Color("#ff8a5c");
+    const meteorTailColor = new THREE.Color("#30060a");
+    const respawnMeteor = (i: number, randomAge = false): void => {
+      const y = 1.3 + weatherRand() * 0.62;
+      const r = domeRadiusAt(y) * 0.9 * Math.sqrt(weatherRand());
+      const a = weatherRand() * Math.PI * 2;
+      meteorHeadPos[i * 3] = Math.cos(a) * r;
+      meteorHeadPos[i * 3 + 1] = y;
+      meteorHeadPos[i * 3 + 2] = Math.sin(a) * r;
+      // Diagonal fall: mostly down, drifting -x / +z, per-meteor jitter.
+      let dx = -0.5 + (weatherRand() - 0.5) * 0.3;
+      let dy = -1;
+      let dz = 0.28 + (weatherRand() - 0.5) * 0.3;
+      const len = Math.hypot(dx, dy, dz);
+      dx /= len;
+      dy /= len;
+      dz /= len;
+      meteorDir[i * 3] = dx;
+      meteorDir[i * 3 + 1] = dy;
+      meteorDir[i * 3 + 2] = dz;
+      meteorSpeed[i] = 2.3 + weatherRand() * 1.4;
+      meteorLife[i] = randomAge ? weatherRand() * 1.2 : 1.2 + weatherRand() * 0.8;
+      if (randomAge) {
+        // Pre-roll so the shower is already falling on first show —
+        // a short step back along the fall line, clamped back inside
+        // the shell so no streak ever starts outside the dome.
+        const back = weatherRand() * 0.25;
+        meteorHeadPos[i * 3] -= dx * back * meteorSpeed[i];
+        meteorHeadPos[i * 3 + 1] -= dy * back * meteorSpeed[i];
+        meteorHeadPos[i * 3 + 2] -= dz * back * meteorSpeed[i];
+        if (meteorHeadPos[i * 3 + 1]! > 1.95) meteorHeadPos[i * 3 + 1] = 1.95;
+        const maxR = domeRadiusAt(meteorHeadPos[i * 3 + 1]!) * 0.95;
+        const rr = Math.hypot(meteorHeadPos[i * 3]!, meteorHeadPos[i * 3 + 2]!);
+        if (rr > maxR && rr > 0) {
+          meteorHeadPos[i * 3] = (meteorHeadPos[i * 3]! / rr) * maxR;
+          meteorHeadPos[i * 3 + 2] = (meteorHeadPos[i * 3 + 2]! / rr) * maxR;
+        }
+      }
+      meteorLineColor[i * 6] = meteorHeadColor.r;
+      meteorLineColor[i * 6 + 1] = meteorHeadColor.g;
+      meteorLineColor[i * 6 + 2] = meteorHeadColor.b;
+      meteorLineColor[i * 6 + 3] = meteorTailColor.r;
+      meteorLineColor[i * 6 + 4] = meteorTailColor.g;
+      meteorLineColor[i * 6 + 5] = meteorTailColor.b;
+    };
+    for (let i = 0; i < MAX_METEORS; i++) respawnMeteor(i, true);
+    const meteorLineGeo = new THREE.BufferGeometry();
+    meteorLineGeo.setAttribute("position", new THREE.BufferAttribute(meteorLinePos, 3));
+    meteorLineGeo.setAttribute("color", new THREE.BufferAttribute(meteorLineColor, 3));
+    const meteorLines = new THREE.LineSegments(
+      meteorLineGeo,
+      new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    const meteorHeadGeo = new THREE.BufferGeometry();
+    meteorHeadGeo.setAttribute("position", new THREE.BufferAttribute(meteorHeadPos, 3));
+    const meteorHeads = new THREE.Points(
+      meteorHeadGeo,
+      new THREE.PointsMaterial({
+        size: 0.24,
+        map: glowTex,
+        color: new THREE.Color("#ff6a3d"),
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        sizeAttenuation: true,
+      }),
+    );
+    const meteorGroup = new THREE.Group();
+    meteorGroup.position.y = DOME_CENTER_Y;
+    meteorGroup.renderOrder = 3;
+    meteorLines.renderOrder = 3;
+    meteorHeads.renderOrder = 3;
+    meteorLines.frustumCulled = false;
+    meteorHeads.frustumCulled = false;
+    meteorGroup.add(meteorLines);
+    meteorGroup.add(meteorHeads);
+    meteorGroup.visible = false;
+    hubGroup.add(meteorGroup);
+
+    /** Advance the ACTIVE weather system one frame (v24). */
+    const updateWeatherParticles = (
+      mode: ReturnType<typeof weatherModeFor>,
+      dt: number,
+      t: number,
+    ): void => {
+      if (mode.kind === "breakout") {
+        sparkles.visible = true;
+        meteorGroup.visible = false;
+        const count = sparkleCountFor(mode.intensity, weatherSmallScreen);
+        sparkleGeo.setDrawRange(0, count);
+        const rise = 0.45 + mode.intensity * 0.9;
+        for (let i = 0; i < count; i++) {
+          let y = sparklePos[i * 3 + 1]! + sparkleSpeed[i]! * rise * dt;
+          if (y > 1.95) {
+            y = 0.06 + weatherRand() * 0.15;
+            placeSparkle(i, y);
+          } else {
+            sparklePos[i * 3 + 1] = y;
+            // Keep the point inside as the dome narrows with height.
+            const maxR = domeRadiusAt(y) * 0.95;
+            const x = sparklePos[i * 3]!;
+            const z = sparklePos[i * 3 + 2]!;
+            const r = Math.hypot(x, z);
+            if (r > maxR && r > 0) {
+              sparklePos[i * 3] = (x / r) * maxR;
+              sparklePos[i * 3 + 2] = (z / r) * maxR;
+            }
+          }
+        }
+        sparkleGeo.getAttribute("position").needsUpdate = true;
+        // Twinkle: the whole field breathes in opacity + size.
+        sparkleMat.opacity = 0.68 + 0.28 * (0.5 + 0.5 * Math.sin(t * 3.1));
+        sparkleMat.size = 0.13 + 0.04 * (0.5 + 0.5 * Math.sin(t * 2.3 + 1.2));
+      } else {
+        sparkles.visible = false;
+        meteorGroup.visible = true;
+        const count = meteorCountFor(mode.intensity, weatherSmallScreen);
+        meteorLineGeo.setDrawRange(0, count * 2);
+        meteorHeadGeo.setDrawRange(0, count);
+        const speedScale = 0.65 + mode.intensity * 0.8;
+        for (let i = 0; i < count; i++) {
+          meteorLife[i] -= dt;
+          let x = meteorHeadPos[i * 3]! + meteorDir[i * 3]! * meteorSpeed[i]! * speedScale * dt;
+          let y = meteorHeadPos[i * 3 + 1]! + meteorDir[i * 3 + 1]! * meteorSpeed[i]! * speedScale * dt;
+          let z = meteorHeadPos[i * 3 + 2]! + meteorDir[i * 3 + 2]! * meteorSpeed[i]! * speedScale * dt;
+          if (y < 0.16 || meteorLife[i] <= 0) {
+            respawnMeteor(i);
+            x = meteorHeadPos[i * 3]!;
+            y = meteorHeadPos[i * 3 + 1]!;
+            z = meteorHeadPos[i * 3 + 2]!;
+          } else {
+            meteorHeadPos[i * 3] = x;
+            meteorHeadPos[i * 3 + 1] = y;
+            meteorHeadPos[i * 3 + 2] = z;
+          }
+          // Streak: head vertex + tail vertex trailing the fall line.
+          meteorLinePos[i * 6] = x;
+          meteorLinePos[i * 6 + 1] = y;
+          meteorLinePos[i * 6 + 2] = z;
+          meteorLinePos[i * 6 + 3] = x - meteorDir[i * 3]! * METEOR_TRAIL;
+          meteorLinePos[i * 6 + 4] = y - meteorDir[i * 3 + 1]! * METEOR_TRAIL;
+          meteorLinePos[i * 6 + 5] = z - meteorDir[i * 3 + 2]! * METEOR_TRAIL;
+        }
+        meteorLineGeo.getAttribute("position").needsUpdate = true;
+        meteorHeadGeo.getAttribute("position").needsUpdate = true;
+      }
+    };
 
     // --- Flying vehicles drifting over the city ---
     const vehicles: Vehicle[] = [];
@@ -1482,6 +1763,10 @@ export function Landscape({
       hubDomeMat.emissiveIntensity = 0.06 + Math.min(0.3, activity * 0.16);
       hubLight.intensity = 14 + activity * 24;
       hubTrimMat.opacity = 0.35 + Math.min(0.55, activity * 0.3);
+
+      // Market weather inside the dome (v24): the App's latest SPY
+      // verdict picks the active particle system for this frame.
+      updateWeatherParticles(weatherModeFor(weatherRef?.current ?? null), dt, t);
 
       // Flying vehicles: slow crossings, wrapping at the haze line.
       for (const v of vehicles) {

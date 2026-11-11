@@ -29,6 +29,10 @@ services:
       # dashboard's Decisions tab shows the full day even when no tab
       # was open while the bots were deciding.
       EVENT_HISTORY_PATH: /data/event-history.json
+      # v24 (market weather): the engine's SPY verdict persists on the
+      # same volume so an API restart keeps the dome's sky until the
+      # next hourly report.
+      WEATHER_STATE_PATH: /data/weather-state.json
       # Phase 12 (v21): the API reads the same keys file as the engine
       # so GET /keys/status can report presence. The file itself is
       # mounted below (read-only); the default source is /dev/null —

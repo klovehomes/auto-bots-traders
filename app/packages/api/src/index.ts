@@ -7,6 +7,7 @@ import {
   fleetModeSchema,
   getPaperKeys,
   loadBots,
+  marketWeatherSchema,
   parseFleetMode,
   resolveBotsDir,
 } from "@fleet/shared";
@@ -18,6 +19,7 @@ import {
   type LiquidationFailure,
 } from "./control.js";
 import { ModeStore } from "./mode.js";
+import { WeatherStore } from "./weather.js";
 import { EventHistoryStore } from "./history.js";
 
 const PORT = Number(process.env.API_PORT ?? 8080);
@@ -54,6 +56,14 @@ const MODE_STATE_PATH =
  */
 const EVENT_HISTORY_PATH =
   process.env.EVENT_HISTORY_PATH ?? "./data/event-history.json";
+/**
+ * Where the market weather (v24) persists. Same durability pattern as
+ * the other fleet state — in Docker it lives on the shared fleet-data
+ * volume so an API restart keeps the dome's weather until the
+ * engine's next hourly report lands.
+ */
+const WEATHER_STATE_PATH =
+  process.env.WEATHER_STATE_PATH ?? "./data/weather-state.json";
 /** How long a kill-liquidate POST waits for the engine's report before
  *  answering with a still-pending report (the report completes over the
  *  WebSocket when it lands). The sim engine polls every 1 s. */
@@ -90,6 +100,18 @@ async function main(): Promise<void> {
   const modeStore = new ModeStore(MODE_STATE_PATH, MODE);
   app.log.info(
     `mode state: ${MODE_STATE_PATH} (desired: ${modeStore.desiredMode()})`,
+  );
+
+  // Market weather (v24): computed by the engine from SPY, reported
+  // over the internal channel, served + broadcast from here so every
+  // dashboard — including a freshly loaded one — shows the same sky.
+  const weatherStore = new WeatherStore(WEATHER_STATE_PATH);
+  app.log.info(
+    `weather state: ${WEATHER_STATE_PATH} (current: ${
+      weatherStore.current()
+        ? `${weatherStore.current()!.kind} ${weatherStore.current()!.spyChangePct}%`
+        : "none reported yet"
+    })`,
   );
 
   // Event history (Phase 6): the stream's durable memory. Ingested
@@ -139,6 +161,15 @@ async function main(): Promise<void> {
     });
   }
 
+  /** Fan a weather change out to every open dashboard (v24). */
+  function broadcastWeather(): void {
+    broadcast({
+      kind: "weather",
+      ts: new Date().toISOString(),
+      state: weatherStore.current(),
+    });
+  }
+
   app.get("/health", async () => ({ ok: true, mode: MODE }));
 
   app.get("/bots", async () => bots);
@@ -149,6 +180,29 @@ async function main(): Promise<void> {
   // Secret values and the Kalshi PEM never leave the loader; there is
   // deliberately no route that returns them.
   app.get("/keys/status", async () => getPaperKeys().status);
+
+  // Market weather (v24): the engine's latest SPY verdict. Dashboards
+  // fetch this on load (before the live socket) and then track the
+  // "weather" WebSocket broadcasts. Null until the engine's first
+  // report — the web falls back to a calm default sky meanwhile.
+  app.get("/weather", async () => weatherStore.current());
+
+  // The engine reports freshly computed weather here (internal token,
+  // same trust as the mode report). Validation is the shared schema;
+  // a malformed report is a 400 and changes nothing.
+  app.post("/internal/weather", async (request, reply) => {
+    if (request.headers["x-internal-token"] !== INTERNAL_EVENT_TOKEN) {
+      return reply.code(401).send({ error: "invalid internal token" });
+    }
+    const parsed = marketWeatherSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid weather", details: parsed.error.issues });
+    }
+    if (weatherStore.update(parsed.data)) broadcastWeather();
+    return { ok: true };
+  });
 
   // --- Kill switch / Risk Gate control ---------------------------------
   // These endpoints are the control surface of the fleet. In deployment
