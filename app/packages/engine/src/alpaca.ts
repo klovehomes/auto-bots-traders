@@ -93,8 +93,12 @@ export interface AlpacaClientLike {
   getHourlyBars(symbol: string, startISO: string): Promise<TimedBar[]>;
   /**
    * Listed option contracts for one underlying + type inside an expiry
-   * window (Phase 3). Served from the Market Data API — the JS SDK has
-   * no contracts surface, so this uses raw REST with the same keys.
+   * window (Phase 3). Served by the Trading API's
+   * GET /v2/options/contracts (v23 fix — contract discovery has never
+   * lived on the Market Data API; the old v1beta1 data-host path 404'd
+   * every pick). The JS SDK has no contracts surface, so this uses raw
+   * REST with the same keys, on the paper or live Trading host per the
+   * client's paper flag.
    */
   getOptionContracts(
     underlying: string,
@@ -339,13 +343,21 @@ export function createAlpacaClient(): AlpacaClientLike | null {
       // The chain inside a 2–4 week window can exceed one page for the
       // most liquid names; follow next_page_token (bounded for safety).
       for (let page = 0; page < 10; page++) {
+        // Contract discovery lives on the Trading API (v23): the paper
+        // host serves paper accounts, the live host live ones — the
+        // same split the SDK client above uses for orders.
         const url = new URL(
-          "https://data.alpaca.markets/v1beta1/options/contracts",
+          paper
+            ? "https://paper-api.alpaca.markets/v2/options/contracts"
+            : "https://api.alpaca.markets/v2/options/contracts",
         );
         url.searchParams.set("underlying_symbols", underlying);
         url.searchParams.set("type", type);
         url.searchParams.set("expiration_date_gte", expiryGte);
         url.searchParams.set("expiration_date_lte", expiryLte);
+        // Listed, tradable contracts only (the endpoint also knows
+        // about inactive/delisted ones).
+        url.searchParams.set("status", "active");
         url.searchParams.set("limit", "1000");
         if (pageToken) url.searchParams.set("page_token", pageToken);
         const res = await fetch(url, {
