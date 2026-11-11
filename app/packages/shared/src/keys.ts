@@ -1,3 +1,4 @@
+import { createPrivateKey } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -22,6 +23,13 @@ import { resolve } from "node:path";
  *   ALPACA_API_SECRET_KEY    Alpaca PAPER account secret
  *   KALSHI_API_KEY_ID        Kalshi demo key id (demo.kalshi.co)
  *   KALSHI_PRIVATE_KEY_PATH  path to the Kalshi demo RSA .pem file
+ *   KALSHI_PRIVATE_KEY       the Kalshi demo RSA private key INLINE —
+ *                            a multi-line PEM block in the file, or a
+ *                            single line with literal `\n` escapes
+ *                            (v21.1: the only form that reaches a
+ *                            Docker container — compose mounts just
+ *                            this one file, so a host .pem path does
+ *                            not exist inside the containers)
  *   KALSHI_ENV               must be "demo" (default) — anything else
  *                            is REFUSED in this phase (no production)
  *
@@ -106,17 +114,56 @@ export function resolveKeysFilePath(env: NodeJS.ProcessEnv = process.env): strin
  * pair of surrounding single/double quotes stripped from the value.
  * Lines without `=` or with an invalid key name are ignored (never an
  * error — a hand-edited file shouldn't crash the engine).
+ *
+ * One multi-line exception (v21.1): a value that OPENS a PEM block —
+ * `KEY=-----BEGIN ... PRIVATE KEY-----` — captures the following
+ * base64 lines up to and including the `-----END ...-----` line, so
+ * a private key can live inside the keys file itself. Capture is
+ * careful with the rest of the file: a line that is not a plausible
+ * base64 continuation (and not the END line) ends the block early
+ * and is re-processed as its own line, so a missing END line can't
+ * swallow the entries that follow. The captured block is validated
+ * by the loader, not here; an incomplete block simply fails there.
  */
 export function parseKeysText(text: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
+  const lines = text.split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const line = (lines[i] ?? "").trim();
+    i += 1;
     if (line === "" || line.startsWith("#")) continue;
     const eq = line.indexOf("=");
     if (eq <= 0) continue;
     const key = line.slice(0, eq).trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
     let value = line.slice(eq + 1).trim();
+
+    if (value.startsWith("-----BEGIN") && !value.includes("-----END")) {
+      const block = [value];
+      while (i < lines.length) {
+        const next = (lines[i] ?? "").trim();
+        if (next.includes("-----END")) {
+          block.push(next);
+          i += 1;
+          break;
+        }
+        // Base64 lines are pure base64 chars with `=` padding only at
+        // the very end. A KEY=VALUE line has `=` mid-string (or chars
+        // outside the alphabet, like `_` or `.`), so it can never be
+        // mistaken for a continuation and is safe to stop on.
+        if (next !== "" && /^[A-Za-z0-9+/]+={0,2}$/.test(next)) {
+          block.push(next);
+          i += 1;
+          continue;
+        }
+        break; // not a continuation — leave it for normal parsing
+      }
+      value = block.join("\n") + "\n";
+      out.set(key, value);
+      continue;
+    }
+
     if (
       value.length >= 2 &&
       ((value.startsWith('"') && value.endsWith('"')) ||
@@ -127,6 +174,16 @@ export function parseKeysText(text: string): Map<string, string> {
     if (value !== "") out.set(key, value);
   }
   return out;
+}
+
+/** True when the text parses as an actual PEM private key. */
+function isValidPrivateKeyPem(text: string): boolean {
+  try {
+    createPrivateKey(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function tail(keyId: string | null): string | null {
@@ -195,18 +252,47 @@ export function loadPaperKeys(options: KeysLoaderOptions = {}): PaperKeys {
   const kalshiEnv = (kalshiEnvHit?.value ?? "demo").trim().toLowerCase();
   const kalshiRefused = kalshiEnv !== "demo";
   const kalshiId = resolve(["KALSHI_API_KEY_ID"]);
-  const pemPathHit = resolve(["KALSHI_PRIVATE_KEY_PATH"]);
+
+  // The private key can arrive two ways, PATH first:
+  //  - KALSHI_PRIVATE_KEY_PATH — a .pem file on the host. Works when
+  //    the app runs directly on the Mac; under Docker the host path
+  //    simply does not exist inside the containers (the live v21
+  //    failure this ordering falls back from).
+  //  - KALSHI_PRIVATE_KEY — the PEM inline in the keys file itself
+  //    (v21.1), as a multi-line block or a single line with literal
+  //    `\n` escapes. This is the form that survives Docker, because
+  //    compose mounts the keys file and nothing else.
+  // Whichever form wins must parse as a real private key.
   let kalshiPem: string | null = null;
   let pemProblem: string | null = null;
+  const pemPathHit = resolve(["KALSHI_PRIVATE_KEY_PATH"]);
   if (pemPathHit) {
+    let raw: string | null = null;
     try {
-      kalshiPem = readFileSync(expandHome(pemPathHit.value), "utf8");
-      if (!kalshiPem.includes("PRIVATE KEY")) {
-        kalshiPem = null;
-        pemProblem = "the file at KALSHI_PRIVATE_KEY_PATH is not a PEM private key";
-      }
+      raw = readFileSync(expandHome(pemPathHit.value), "utf8");
     } catch {
       pemProblem = "the Kalshi private key file could not be read";
+    }
+    if (raw !== null) {
+      if (isValidPrivateKeyPem(raw)) {
+        kalshiPem = raw;
+      } else {
+        pemProblem = "the file at KALSHI_PRIVATE_KEY_PATH is not a PEM private key";
+      }
+    }
+  }
+  if (kalshiPem === null) {
+    const inlineHit = resolve(["KALSHI_PRIVATE_KEY"]);
+    if (inlineHit) {
+      const candidate = inlineHit.value.includes("\\n")
+        ? inlineHit.value.replace(/\\n/g, "\n")
+        : inlineHit.value;
+      if (isValidPrivateKeyPem(candidate)) {
+        kalshiPem = candidate;
+        pemProblem = null;
+      } else if (pemProblem === null) {
+        pemProblem = "the inline KALSHI_PRIVATE_KEY is not a valid PEM private key";
+      }
     }
   }
   const kalshiLoaded = !kalshiRefused && kalshiId !== null && kalshiPem !== null;
@@ -236,7 +322,7 @@ export function loadPaperKeys(options: KeysLoaderOptions = {}): PaperKeys {
           : pemProblem ??
             (kalshiId === null
               ? "no Kalshi demo key id found in the keys file or environment"
-              : "KALSHI_PRIVATE_KEY_PATH is not set"),
+              : "no Kalshi private key — KALSHI_PRIVATE_KEY (inline) and KALSHI_PRIVATE_KEY_PATH are both unset"),
     },
   };
 

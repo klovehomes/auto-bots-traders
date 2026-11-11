@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────
-# TraderBot paper-trading keys file — TEMPLATE (Phase 12, v21)
+# TraderBot paper-trading keys file — TEMPLATE (Phase 12, v21.1)
 #
 # Copy this file to ~/traderbot-keys.txt (in your home folder, OUTSIDE
 # the repo — that placement is deliberate, so real keys can never ride
@@ -31,11 +31,27 @@ ALPACA_API_SECRET_KEY=
 #   https://demo.kalshi.co
 # Sign up / log in there, then create an API key (Settings → API).
 # You will get a Key ID and a one-time download of the RSA private
-# key (.pem file). Save the .pem somewhere private on this Mac
-# (e.g. ~/kalshi-demo.pem, chmod 600) and point at it below — the
-# app reads the file; the key itself never goes in this file.
+# key (.pem file).
 KALSHI_API_KEY_ID=
-KALSHI_PRIVATE_KEY_PATH=
+
+# The private key itself goes INLINE, right here in this file.
+# This is the form that works under Docker: compose mounts ONLY
+# this keys file into the containers, so a .pem sitting elsewhere
+# on the Mac is invisible inside them (a path to it just reads as
+# "could not be read" in the container). Open your downloaded
+# .pem, copy its full contents, and paste them in place of the
+# placeholder lines between BEGIN and END below — keep the BEGIN
+# line on the KALSHI_PRIVATE_KEY= line and the END line as the
+# last line of the block, exactly as your .pem has them:
+KALSHI_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----
+# …replace these comment lines with the base64 lines from your .pem…
+-----END PRIVATE KEY-----
+
+# Alternative, only when the app runs directly on the Mac (NOT
+# under Docker): skip the block above and point at the .pem file
+# instead. A readable, valid path wins over the inline block when
+# both are set.
+# KALSHI_PRIVATE_KEY_PATH=~/kalshi-demo.pem
 
 # Kalshi environment. This build trades the DEMO venue only:
 # any value other than "demo" is refused at load time.

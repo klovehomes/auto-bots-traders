@@ -247,3 +247,70 @@ feature change.
    Wesley entries against Alpaca paper, Vega shadow unless
    `VEGA_SHADOW=false`, PolyCrypt9000's crypto + Kalshi demo
    entries and her daily Polymarket SHADOW note.
+
+## v21.1 addendum — the Kalshi .pem and Docker (found live, 2026-11-10)
+
+**The gap.** Step 3 above mounts exactly ONE host file into the
+containers: the keys file, at `/keys/traderbot-keys.txt`. The v21
+loader read the Kalshi private key from `KALSHI_PRIVATE_KEY_PATH` —
+a path on the *host* (e.g. `/Users/keithlove/kalshi-demo.pem`).
+Inside a container that path does not exist, so the read always
+failed and Kalshi always reported not loaded with "the Kalshi
+private key file could not be read" — no matter where the .pem sat
+on the Mac. Alpaca was unaffected (its values are inline in the
+keys file), which is exactly the split Keith's dashboard showed:
+Alpaca ✓ (file) · Kalshi ✗. First live-paper confirmation for
+Alpaca happened that evening; Kalshi was blocked by this gap.
+
+**The fix.** The PEM can now travel inside the keys file itself as
+`KALSHI_PRIVATE_KEY`, in either of two forms:
+
+- a **multi-line PEM block** — `KALSHI_PRIVATE_KEY=-----BEGIN
+  PRIVATE KEY-----`, the base64 lines, then the `-----END PRIVATE
+  KEY-----` line. The dotenv parser captures the whole block
+  (capture stops safely at the first non-base64 line, so a missing
+  END line can't swallow the entries after the block);
+- a **single line** with literal `\n` escapes, unescaped at load.
+
+Both forms — and the PATH form too, replacing its old substring
+check — are validated by actually parsing the key
+(`node:crypto` `createPrivateKey`). An invalid inline key reports
+the secret-free detail `the inline KALSHI_PRIVATE_KEY is not a
+valid PEM private key` in `GET /keys/status`. Precedence:
+`KALSHI_PRIVATE_KEY_PATH` wins when set, readable, and valid
+(running the engine directly on the Mac is unchanged); otherwise
+a valid inline key is used. All other v21 semantics stand — file
+beats env, non-demo `KALSHI_ENV` refused, secrets never in status,
+logs, or state (the new harness asserts the status JSON contains
+no fragment of the inline PEM body).
+
+`app/keys.example.txt` now documents the inline block as the
+Mac/Docker way (its placeholder block is comments only and, copied
+verbatim, correctly does NOT load — the harness proves it).
+
+**Revised Mac step for Kalshi (supersedes the `.pem` bullet in
+step 1 above):**
+
+1. Open `~/traderbot-keys.txt`.
+2. Find the `KALSHI_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----`
+   block, open your downloaded demo `.pem`, and paste its base64
+   lines in place of the placeholder comment lines — BEGIN line
+   stays on the `KALSHI_PRIVATE_KEY=` line, END line last.
+3. Leave `KALSHI_PRIVATE_KEY_PATH` blank/commented out.
+4. Recreate so the re-mounted file is picked up:
+   `docker compose up -d` in `app/` (a plain restart keeps the old
+   mount's contents — recreation is what re-reads the host file;
+   `docker compose exec api wc -c /keys/traderbot-keys.txt` should
+   now show a size in the thousands, and the dashboard readout
+   should flip to `Kalshi ✓ (file)`).
+
+**Verification (v21.1):** new harness `app/tools/test-keys-v21-1.ts`
+34/34 — block capture + file-integrity around it, inline block
+loads and is RSA-PSS sign-ready, `\n`-escaped form loads from file
+and env, invalid inline → exact detail string, unreadable PATH +
+valid inline → loads, valid PATH + inline → PATH wins, non-key
+PATH file → parse-based detail, template-verbatim does not load,
+status/summary free of PEM fragments. Original loader harness
+32/32 (its PEM fixture is now a real generated RSA key, as real
+validation requires), Kalshi harness 20/20, boot smoke 11/11,
+typecheck + build pass, web bundle carries `v21.1`.

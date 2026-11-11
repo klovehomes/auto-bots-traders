@@ -21,6 +21,7 @@
  * /tmp — it is wiped on runtime restart), mirroring test-history-v19.
  * All "secrets" below are fake strings minted for this test.
  */
+import { generateKeyPairSync } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -51,12 +52,12 @@ mkdirSync(SCRATCH, { recursive: true });
 const FAKE_ALPACA_ID = "PKFAKEALPACAID1234WXYZ";
 const FAKE_ALPACA_SECRET = "fake-alpaca-secret-do-not-leak-0001";
 const FAKE_KALSHI_ID = "kalshi-demo-key-id-ABCD-EFGH";
-const FAKE_PEM = [
-  "-----BEGIN PRIVATE KEY-----",
-  "MIIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFake",
-  "-----END PRIVATE KEY-----",
-  "",
-].join("\n");
+// v21.1: the loader validates PEMs by really parsing them, so the
+// fixture is a real (throwaway, test-only) RSA key, not fake base64.
+const FAKE_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
+  .privateKey.export({ type: "pkcs8", format: "pem" })
+  .toString();
+const FAKE_PEM_FRAGMENT = (FAKE_PEM.split("\n")[2] ?? "").slice(0, 24);
 
 // ---------------------------------------------------------------- parse
 {
@@ -183,7 +184,7 @@ writeFileSync(
   const keys = loadPaperKeys({ keysFilePath: keysPath, env: {} as NodeJS.ProcessEnv });
   const statusJson = JSON.stringify(keys.status);
   check("masking: status has no alpaca secret", !statusJson.includes(FAKE_ALPACA_SECRET));
-  check("masking: status has no pem content", !statusJson.includes("MIIFake"));
+  check("masking: status has no pem content", !statusJson.includes(FAKE_PEM_FRAGMENT));
   check("masking: status has no full alpaca id", !statusJson.includes(FAKE_ALPACA_ID));
   check("masking: status has no full kalshi id", !statusJson.includes(FAKE_KALSHI_ID));
   check("masking: alpaca tail is last 4", keys.status.alpaca.keyIdTail === FAKE_ALPACA_ID.slice(-4));
