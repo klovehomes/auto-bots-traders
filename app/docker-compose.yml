@@ -85,6 +85,10 @@ services:
         # it into the static bundle at build time, so changing API_URL
         # requires `docker compose up -d --build`, not a restart.
         VITE_API_URL: ${API_URL:-}
+        # Optional display override for the build version shown under
+        # the "Trader Bot Landscape" header (BUILD_VERSION in .env).
+        # Blank keeps the checked-in default in web/src/version.ts.
+        VITE_BUILD_VERSION: ${BUILD_VERSION:-}
     ports:
       - "4173:4173"
     depends_on:

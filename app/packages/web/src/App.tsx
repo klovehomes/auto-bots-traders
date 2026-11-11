@@ -8,6 +8,7 @@ import {
 } from "./Landscape.js";
 import { Leaderboard } from "./Leaderboard.js";
 import { BotAvatar } from "./avatars.js";
+import { BUILD_VERSION } from "./version.js";
 import {
   computeStats,
   computeTotals,
@@ -649,6 +650,7 @@ export function App() {
       <header className="header">
         <div>
           <h1>Trader Bot Landscape</h1>
+          <p className="build-version">Build {BUILD_VERSION}</p>
           <p className="subtitle">
             Five bots, one valley — live paper-trading visualization.
           </p>

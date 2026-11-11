@@ -40,6 +40,13 @@ body {
   color: #8b98a9;
 }
 
+.build-version {
+  margin: 0 0 3px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: #8b98a9;
+}
+
 .header-badges {
   display: flex;
   flex-direction: column;
