@@ -1,4 +1,6 @@
 import {
+  describeKeysStatus,
+  getPaperKeys,
   loadBots,
   resolveBotsDir,
   type BotConfig,
@@ -6,11 +8,14 @@ import {
 } from "@fleet/shared";
 import { checkAlpacaPaperConnection, createAlpacaClient } from "./alpaca.js";
 import { createControlClient } from "./control.js";
+import { createKalshiClient } from "./kalshi.js";
 import { createModeSupervisor, resolveBootMode } from "./mode.js";
 import { createControlRouter, startPaperTrader } from "./paper.js";
+import { startPolyCryptTrader } from "./polycrypt.js";
 import { startSimulator } from "./sim.js";
 import { startSnapbackTrader } from "./snapback.js";
 import { startVegaTrader } from "./vega.js";
+import { startWesleyTrader } from "./wesley.js";
 
 const API_BASE_URL = process.env.API_BASE_URL ?? "http://localhost:8080";
 const INTERNAL_EVENT_TOKEN = process.env.INTERNAL_EVENT_TOKEN ?? "dev-token";
@@ -24,19 +29,25 @@ const EVENT_INTERVAL_MS = 5000;
 const FIRST_EVENT_DELAY_MS = 1000;
 
 /**
- * Runner registry — bots with a real strategy plugin on the paper
- * account: Trendia (Phase 1, daily bars), Vega (Phase 3, options;
- * he starts in shadow mode per the Phase 3 scope, see vega.ts) and
- * Snapback (Phase 4, hourly mean reversion). Every other bot stays
- * on the simulator until its own phase lands.
+ * Runner registry — as of Phase 12 (v21) every bot has a real paper
+ * runner: Trendia (Phase 1, daily bars), Vega (Phase 3, options; he
+ * starts in shadow mode per the Phase 3 scope, see vega.ts), Snapback
+ * (Phase 4, hourly mean reversion), Wesley (Phase 12, income wheel on
+ * Alpaca paper) and PolyCrypt9000 (Phase 12, Alpaca paper crypto +
+ * Kalshi demo; her Polymarket sleeve stays shadow — no paper venue
+ * exists for it).
  */
 const TRENDIA_CODENAME = "trendia";
 const VEGA_CODENAME = "vega";
 const SNAPBACK_CODENAME = "snapback";
+const WESLEY_CODENAME = "wesley";
+const POLYCRYPT_CODENAME = "polycrypt9000";
 const PAPER_RUNNER_CODENAMES: readonly string[] = [
   TRENDIA_CODENAME,
   VEGA_CODENAME,
   SNAPBACK_CODENAME,
+  WESLEY_CODENAME,
+  POLYCRYPT_CODENAME,
 ];
 
 /** Publish one event to the API service, which fans it out over WebSocket. */
@@ -146,57 +157,114 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ---- MODE=paper (Phases 1 + 3 + 4) -----------------------------------
-  // Trendia (Phase 1), Vega (Phase 3) and Snapback (Phase 4) run on
-  // the real Alpaca paper account (real market data, simulated money)
-  // via their runners — Vega in shadow mode until VEGA_SHADOW=false.
-  // The remaining bots have no strategy plugin yet, so they keep
-  // running the simulator — clearly labelled SIM in their reason
-  // strings — until their turn.
+  // ---- MODE=paper (Phases 1 + 3 + 4 + 12) ------------------------------
+  // All five bots have real paper runners (Phase 12 completed the
+  // set): Trendia, Vega (shadow until VEGA_SHADOW=false) and Snapback
+  // on the Alpaca paper account; Wesley's income wheel on Alpaca
+  // paper; PolyCrypt9000 on Alpaca paper crypto + the Kalshi demo
+  // venue, her Polymarket sleeve staying shadow by design. Keys come
+  // from the shared key-file loader (~/traderbot-keys.txt by default).
   const vegaShadow =
     (process.env.VEGA_SHADOW ?? "true").trim().toLowerCase() !== "false";
+  const keys = getPaperKeys();
+  console.log(`[engine] paper keys — ${describeKeysStatus(keys.status)}`);
   console.log(
-    "[engine] MODE=paper — Trendia trades the Alpaca paper account on real market data; " +
+    "[engine] MODE=paper — Trendia, Snapback and Wesley trade the Alpaca paper account on real market data; " +
       `Vega runs his Phase 3 options pipeline (${vegaShadow ? "SHADOW mode — no orders" : "live paper orders"}); ` +
-      "Snapback trades real paper entries/exits on her hourly mean-reversion runner; " +
-      "Wesley and PolyCrypt9000 stay on the simulator",
+      "PolyCrypt9000 trades Alpaca paper crypto + Kalshi demo (Polymarket sleeve shadow)",
   );
   await checkAlpacaPaperConnection();
 
-  const trendia = active.find((b) => b.codename === TRENDIA_CODENAME);
-  const vega = active.find((b) => b.codename === VEGA_CODENAME);
-  const snapback = active.find((b) => b.codename === SNAPBACK_CODENAME);
-  const client = createAlpacaClient();
+  const byCodename = (codename: string): BotConfig | undefined =>
+    active.find((b) => b.codename === codename);
+  const alpacaClient = createAlpacaClient();
+  const kalshiClient = createKalshiClient();
 
-  if ((trendia || vega || snapback) && client) {
+  /**
+   * Paper was requested but this bot has no venue: leave ONE clear
+   * NO-TRADE decision in its record saying exactly why, per Phase 12 —
+   * silence in the Decisions tab reads as a bug, not a missing key.
+   */
+  const notePaperUnavailable = (bot: BotConfig, why: string): void => {
+    void postEvent({
+      bot: bot.name,
+      type: "signal",
+      decision_id: null,
+      symbol: null,
+      side: null,
+      qty: null,
+      price: null,
+      pnl: null,
+      reason: `PAPER · NO TRADE — ${why} · This bot is running on the simulator until its paper venue is available.`,
+      ts: new Date().toISOString(),
+    });
+  };
+
+  if (alpacaClient || kalshiClient) {
     const router = createControlRouter(control);
     const running: string[] = [];
-    if (trendia) {
-      startPaperTrader(trendia, client, postEvent, router.forBots([TRENDIA_CODENAME]));
-      running.push(TRENDIA_CODENAME);
+    const alpacaBots: [string, (bot: BotConfig) => void][] = [
+      [
+        TRENDIA_CODENAME,
+        (bot) => startPaperTrader(bot, alpacaClient!, postEvent, router.forBots([TRENDIA_CODENAME])),
+      ],
+      [
+        VEGA_CODENAME,
+        (bot) => startVegaTrader(bot, alpacaClient!, postEvent, router.forBots([VEGA_CODENAME])),
+      ],
+      [
+        SNAPBACK_CODENAME,
+        (bot) => startSnapbackTrader(bot, alpacaClient!, postEvent, router.forBots([SNAPBACK_CODENAME])),
+      ],
+      [
+        WESLEY_CODENAME,
+        (bot) => startWesleyTrader(bot, alpacaClient!, postEvent, router.forBots([WESLEY_CODENAME])),
+      ],
+    ];
+    for (const [codename, start] of alpacaBots) {
+      const bot = byCodename(codename);
+      if (!bot) continue;
+      if (alpacaClient) {
+        start(bot);
+        running.push(codename);
+      } else {
+        notePaperUnavailable(
+          bot,
+          "Alpaca paper keys not loaded (no ALPACA_API_KEY_ID/ALPACA_API_SECRET_KEY in the keys file or environment), so this bot cannot place paper orders.",
+        );
+      }
     }
-    if (vega) {
-      startVegaTrader(vega, client, postEvent, router.forBots([VEGA_CODENAME]));
-      running.push(VEGA_CODENAME);
-    }
-    if (snapback) {
-      startSnapbackTrader(snapback, client, postEvent, router.forBots([SNAPBACK_CODENAME]));
-      running.push(SNAPBACK_CODENAME);
+    const polycrypt = byCodename(POLYCRYPT_CODENAME);
+    if (polycrypt) {
+      // She starts with whichever venues exist; a missing venue
+      // surfaces inside her runner as sleeve-level NO-TRADE records.
+      startPolyCryptTrader(
+        polycrypt,
+        { alpaca: alpacaClient, kalshi: kalshiClient },
+        postEvent,
+        router.forBots([POLYCRYPT_CODENAME]),
+      );
+      running.push(POLYCRYPT_CODENAME);
     }
     const others = active.filter((b) => !running.includes(b.codename));
     if (others.length > 0) {
       startSimulator(others, postEvent, router.forOthers(running));
     }
   } else {
-    // No keys (or no runner bot enabled): never fabricate a broker
-    // connection. Fall back to the full simulator so the dashboard
-    // still runs, and say so loudly in the log.
+    // No keys at all: never fabricate a broker connection. Every bot
+    // gets its NO-TRADE record, then the full simulator runs so the
+    // dashboard still works — exactly the pre-v21 fallback, now with
+    // the reason on the record.
     console.warn(
-      "[engine] MODE=paper but " +
-        (!client
-          ? "Alpaca keys are not configured — Trendia, Vega and Snapback CANNOT trade paper. Running the simulator for every bot instead."
-          : "none of Trendia, Vega or Snapback is among the enabled bots — running the simulator for every bot."),
+      "[engine] MODE=paper but no paper keys are loaded (keys file or environment) — " +
+        "NO bot can trade paper. Running the simulator for every bot instead.",
     );
+    for (const bot of active) {
+      notePaperUnavailable(
+        bot,
+        "paper keys not loaded — no Alpaca paper keys and no Kalshi demo keys were found in the keys file or environment.",
+      );
+    }
     startSimulator(active, postEvent, control);
   }
 }

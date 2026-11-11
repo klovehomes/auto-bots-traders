@@ -190,6 +190,11 @@ export class EventHistoryStore {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as
         | PersistedHistoryV2
         | PersistedHistoryV1;
+      // Read pre-narrowing: after the v2/v1 branches return, the union
+      // narrows to never and TS 5.9 refuses parsed.version below
+      // (Phase 12 drive-by fix for a latent typecheck error; the
+      // runtime behavior is unchanged).
+      const rawVersion: unknown = parsed.version;
 
       if (parsed.version === 2) {
         if (
@@ -253,7 +258,7 @@ export class EventHistoryStore {
         return report;
       }
 
-      throw new Error(`unsupported version ${String(parsed.version)}`);
+      throw new Error(`unsupported version ${String(rawVersion)}`);
     } catch (err) {
       // A corrupt history file must never wedge the API: start with
       // an empty history and say so loudly (same rule as ModeStore).

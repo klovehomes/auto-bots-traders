@@ -3,3 +3,8 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Paper-trading keys files (Phase 12) — never commit real keys.
+keys.txt
+traderbot-keys.txt
+*.keys.txt

@@ -82,6 +82,20 @@ interface ModeMessage {
   state: ModeState;
 }
 
+// --- Paper keys status (Phase 12 — GET /keys/status, presence only) --
+export interface ProviderKeyStatus {
+  loaded: boolean;
+  source: "file" | "env" | "none";
+  keyIdTail: string | null;
+  detail: string | null;
+}
+
+export interface KeysStatus {
+  keysFile: { path: string; exists: boolean };
+  alpaca: ProviderKeyStatus;
+  kalshi: ProviderKeyStatus & { env: string; refused: boolean };
+}
+
 const MODE_LABELS: Record<FleetMode, string> = {
   sim: "Simulator",
   paper: "Paper trading",
@@ -194,6 +208,8 @@ export function App() {
   // engine's reported running mode). The header badge shows the
   // running mode when known, else the desired one.
   const [modeState, setModeState] = useState<ModeState | null>(null);
+  // Paper keys readout (Phase 12): presence only, from GET /keys/status.
+  const [keysStatus, setKeysStatus] = useState<KeysStatus | null>(null);
   // A mode the user picked in the dropdown but hasn't confirmed yet.
   const [modeChoice, setModeChoice] = useState<FleetMode | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
@@ -431,6 +447,33 @@ export function App() {
       });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Paper keys status (Phase 12): fetched once on load, refreshed on
+  // an interval — flipping keys means editing a file on the host, and
+  // the readout should notice without a dashboard reload. Presence
+  // only; the API never serves a secret value.
+  useEffect(() => {
+    let cancelled = false;
+    const load = (): void => {
+      fetch(`${API_BASE}/keys/status`)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json() as Promise<KeysStatus>;
+        })
+        .then((data) => {
+          if (!cancelled) setKeysStatus(data);
+        })
+        .catch(() => {
+          // Best-effort readout; absence renders as "unknown".
+        });
+    };
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
     };
   }, []);
 
@@ -704,6 +747,20 @@ export function App() {
                 ⟳ Restarting the engine into {MODE_LABELS[desiredMode]}…
               </p>
             )}
+            <p className="keys-status" role="status">
+              Paper keys: Alpaca{" "}
+              {keysStatus === null
+                ? "…"
+                : keysStatus.alpaca.loaded
+                  ? `✓${keysStatus.alpaca.source !== "none" ? ` (${keysStatus.alpaca.source})` : ""}`
+                  : "✗"}{" "}
+              · Kalshi{" "}
+              {keysStatus === null
+                ? "…"
+                : keysStatus.kalshi.loaded
+                  ? `✓${keysStatus.kalshi.source !== "none" ? ` (${keysStatus.kalshi.source})` : ""}`
+                  : "✗"}
+            </p>
             {pendingMode && (
               <div
                 className="mode-confirm"

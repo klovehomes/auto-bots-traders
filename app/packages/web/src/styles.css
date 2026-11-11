@@ -105,6 +105,14 @@ body {
   color: #f0b429;
 }
 
+.keys-status {
+  margin: 2px 0 0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #8b98a9;
+  text-align: right;
+}
+
 .mode-confirm {
   max-width: 350px;
   background: #0d1424;

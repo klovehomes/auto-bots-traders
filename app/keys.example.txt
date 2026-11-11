@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────
+# TraderBot paper-trading keys file — TEMPLATE (Phase 12, v21)
+#
+# Copy this file to ~/traderbot-keys.txt (in your home folder, OUTSIDE
+# the repo — that placement is deliberate, so real keys can never ride
+# a commit), fill in the values, then lock it down:
+#
+#     cp app/keys.example.txt ~/traderbot-keys.txt
+#     chmod 600 ~/traderbot-keys.txt
+#
+# The app reads this file at startup (engine + API). The location can
+# be changed with the KEYS_FILE environment variable. Values in this
+# file WIN over the same variables in app/.env / the environment,
+# which remain as a fallback. Format: one KEY=VALUE per line, `#`
+# comments, blank lines ignored, quotes optional.
+#
+# Nothing in this file is ever logged, served by the API, or written
+# to a state file. The dashboard shows only "Alpaca ✓ / Kalshi ✓" and
+# the last 4 characters of each key ID.
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Alpaca PAPER account keys ─────────────────────────────────────
+# From the Alpaca paper dashboard:
+#   https://app.alpaca.markets/paper/dashboard/overview
+# ("API Keys" panel on the PAPER account — not the live account.)
+ALPACA_API_KEY_ID=
+ALPACA_API_SECRET_KEY=
+
+# ── Kalshi DEMO keys (the prediction sleeve's paper venue) ────────
+# Kalshi's demo environment is a SEPARATE account from production:
+#   https://demo.kalshi.co
+# Sign up / log in there, then create an API key (Settings → API).
+# You will get a Key ID and a one-time download of the RSA private
+# key (.pem file). Save the .pem somewhere private on this Mac
+# (e.g. ~/kalshi-demo.pem, chmod 600) and point at it below — the
+# app reads the file; the key itself never goes in this file.
+KALSHI_API_KEY_ID=
+KALSHI_PRIVATE_KEY_PATH=
+
+# Kalshi environment. This build trades the DEMO venue only:
+# any value other than "demo" is refused at load time.
+KALSHI_ENV=demo

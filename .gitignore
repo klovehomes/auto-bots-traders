@@ -34,3 +34,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Paper-trading keys files (Phase 12) — real keys live OUTSIDE the repo
+# (~/traderbot-keys.txt); these patterns make sure a copy placed in the
+# tree can never be committed.
+keys.txt
+traderbot-keys.txt
+*.keys.txt

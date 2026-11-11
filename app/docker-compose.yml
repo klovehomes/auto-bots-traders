@@ -29,10 +29,16 @@ services:
       # dashboard's Decisions tab shows the full day even when no tab
       # was open while the bots were deciding.
       EVENT_HISTORY_PATH: /data/event-history.json
+      # Phase 12 (v21): the API reads the same keys file as the engine
+      # so GET /keys/status can report presence. The file itself is
+      # mounted below (read-only); the default source is /dev/null —
+      # an empty mount — until TRADERBOT_KEYS_FILE is set in .env.
+      KEYS_FILE: /keys/traderbot-keys.txt
     volumes:
       # Bot definitions live outside the app image; mounted read-only.
       - ../bots:/bots:ro
       - fleet-data:/data
+      - ${TRADERBOT_KEYS_FILE:-/dev/null}:/keys/traderbot-keys.txt:ro
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -64,6 +70,14 @@ services:
       # Phase 4 (Snapback): her state (tracked positions, pending
       # orders, realized PnL) persists on the same shared data volume.
       SNAPBACK_STATE_PATH: /data/paper-snapback-state.json
+      # Phase 12 (v21): paper keys come from the local keys file
+      # (mounted read-only below from TRADERBOT_KEYS_FILE in .env;
+      # /dev/null = empty file until that's set). File beats env.
+      KEYS_FILE: /keys/traderbot-keys.txt
+      # Phase 12: Wesley's wheel state and PolyCrypt9000's sleeve
+      # state persist on the shared data volume like the others.
+      WESLEY_STATE_PATH: /data/paper-wesley-state.json
+      POLYCRYPT_STATE_PATH: /data/paper-polycrypt-state.json
       # Phase 5: the stored dashboard mode choice (written by the API,
       # see MODE_STATE_PATH on the api service). Read at boot; when the
       # dashboard flips the switch, this engine exits and the restart
@@ -72,6 +86,7 @@ services:
     volumes:
       - ../bots:/bots:ro
       - fleet-data:/data
+      - ${TRADERBOT_KEYS_FILE:-/dev/null}:/keys/traderbot-keys.txt:ro
     depends_on:
       - api
     restart: unless-stopped

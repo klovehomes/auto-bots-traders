@@ -5,6 +5,7 @@ import { WebSocket } from "ws";
 import {
   fleetEventSchema,
   fleetModeSchema,
+  getPaperKeys,
   loadBots,
   parseFleetMode,
   resolveBotsDir,
@@ -137,6 +138,13 @@ async function main(): Promise<void> {
   app.get("/health", async () => ({ ok: true, mode: MODE }));
 
   app.get("/bots", async () => bots);
+
+  // Paper-keys status (Phase 12, v21): PRESENCE ONLY. The shared
+  // loader's status surface is the whole answer — per-provider loaded
+  // flag, where the key id came from, and the key id's last 4 chars.
+  // Secret values and the Kalshi PEM never leave the loader; there is
+  // deliberately no route that returns them.
+  app.get("/keys/status", async () => getPaperKeys().status);
 
   // --- Kill switch / Risk Gate control ---------------------------------
   // These endpoints are the control surface of the fleet. In deployment

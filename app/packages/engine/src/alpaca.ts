@@ -1,4 +1,5 @@
 import Alpaca from "@alpacahq/alpaca-trade-api";
+import { getPaperKeys } from "@fleet/shared";
 import type { DailyBar, TimedBar } from "./indicators.js";
 
 /**
@@ -77,7 +78,8 @@ export interface AlpacaClientLike {
     qty: number;
     side: "buy" | "sell";
     type: "market" | "limit";
-    timeInForce: "day" | "opg";
+    /** "gtc" is required for crypto orders (Phase 12: PolyCrypt9000). */
+    timeInForce: "day" | "opg" | "gtc" | "ioc";
     /** Required when type is "limit" (per-share for equities, per-contract for options). */
     limitPrice?: number;
   }): Promise<AlpacaOrder>;
@@ -105,6 +107,15 @@ export interface AlpacaClientLike {
    * on the free indicative feed (Phase 3).
    */
   getOptionSnapshots(symbols: string[]): Promise<Map<string, OptionSnapshot>>;
+  /**
+   * Hourly crypto bars (Phase 12: PolyCrypt9000's breakout sleeve) from
+   * the Market Data API's crypto endpoint — the JS SDK's stock bars do
+   * not serve crypto pairs. Bars carry volume (the breakout rule
+   * confirms on it). Symbol form: "BTC/USD".
+   */
+  getCryptoBars(symbol: string, startISO: string): Promise<TimedBar[]>;
+  /** Latest crypto trade price for a pair like "BTC/USD" (Phase 12). */
+  getCryptoLatestPrice(symbol: string): Promise<number>;
 }
 
 interface RawPosition {
@@ -163,10 +174,11 @@ async function httpError(context: string, res: Response): Promise<Error> {
 }
 
 function keysConfigured(): { keyId: string; secretKey: string } | null {
-  const keyId = process.env.ALPACA_API_KEY;
-  const secretKey = process.env.ALPACA_API_SECRET;
-  if (!keyId || !secretKey) return null;
-  return { keyId, secretKey };
+  // Phase 12 (v21): keys resolve through the shared key-file loader —
+  // ~/traderbot-keys.txt (or KEYS_FILE) wins, environment is fallback.
+  const keys = getPaperKeys();
+  if (!keys.alpacaKeyId || !keys.alpacaSecretKey) return null;
+  return { keyId: keys.alpacaKeyId, secretKey: keys.alpacaSecretKey };
 }
 
 /** Build the SDK-backed client, or null when no keys are configured. */
@@ -426,6 +438,78 @@ export function createAlpacaClient(): AlpacaClientLike | null {
       }
       return out;
     },
+
+    async getCryptoBars(symbol: string, startISO: string) {
+      const bars: TimedBar[] = [];
+      let pageToken: string | null = null;
+      // ~45 days of hourly bars ≈ 1,100 rows; the endpoint pages at
+      // 10,000, so this loop is a safety net, not the common path.
+      for (let page = 0; page < 5; page++) {
+        const url = new URL("https://data.alpaca.markets/v1beta3/crypto/us/bars");
+        url.searchParams.set("symbols", symbol);
+        url.searchParams.set("timeframe", "1Hour");
+        url.searchParams.set("start", startISO);
+        url.searchParams.set("limit", "10000");
+        url.searchParams.set("sort", "asc");
+        if (pageToken) url.searchParams.set("page_token", pageToken);
+        const res = await fetch(url, {
+          headers: {
+            "APCA-API-KEY-ID": keys.keyId,
+            "APCA-API-SECRET-KEY": keys.secretKey,
+          },
+        });
+        if (!res.ok) {
+          throw await httpError(`crypto bars for ${symbol}`, res);
+        }
+        const body = (await res.json()) as {
+          bars?: Record<
+            string,
+            { t: string; o: number; h: number; l: number; c: number; v: number }[]
+          >;
+          next_page_token?: string | null;
+        };
+        for (const b of body.bars?.[symbol] ?? []) {
+          bars.push({
+            timestamp: b.t,
+            open: Number(b.o),
+            high: Number(b.h),
+            low: Number(b.l),
+            close: Number(b.c),
+            volume: Number(b.v),
+          });
+        }
+        pageToken = body.next_page_token ?? null;
+        if (!pageToken) break;
+      }
+      bars.sort((a, b) =>
+        a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+      );
+      return bars;
+    },
+
+    async getCryptoLatestPrice(symbol: string) {
+      const url = new URL(
+        "https://data.alpaca.markets/v1beta3/crypto/us/latest/trades",
+      );
+      url.searchParams.set("symbols", symbol);
+      const res = await fetch(url, {
+        headers: {
+          "APCA-API-KEY-ID": keys.keyId,
+          "APCA-API-SECRET-KEY": keys.secretKey,
+        },
+      });
+      if (!res.ok) {
+        throw await httpError(`crypto latest trade for ${symbol}`, res);
+      }
+      const body = (await res.json()) as {
+        trades?: Record<string, { p: number }>;
+      };
+      const price = Number(body.trades?.[symbol]?.p ?? NaN);
+      if (!Number.isFinite(price) || price <= 0) {
+        throw new Error(`crypto latest trade for ${symbol}: no price in response`);
+      }
+      return price;
+    },
   };
 }
 
@@ -433,8 +517,9 @@ export async function checkAlpacaPaperConnection(): Promise<void> {
   const keys = keysConfigured();
   if (!keys) {
     console.log(
-      "[alpaca] stub mode: Alpaca keys not configured " +
-        "(ALPACA_API_KEY / ALPACA_API_SECRET unset) — skipping broker connection check.",
+      "[alpaca] stub mode: Alpaca paper keys not loaded " +
+        "(no ALPACA_API_KEY_ID/ALPACA_API_SECRET_KEY in the keys file or environment) " +
+        "— skipping broker connection check.",
     );
     return;
   }
