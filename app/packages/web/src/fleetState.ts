@@ -80,11 +80,13 @@ export function computeStats(
 
   const chronological = [...events].reverse();
   for (const event of chronological) {
-    let stats = map.get(event.bot);
-    if (!stats) {
-      stats = emptyStats(event.bot);
-      map.set(event.bot, stats);
-    }
+    const stats = map.get(event.bot);
+    // Events from names outside the current bot config are ignored.
+    // Most importantly, the engine's DATA_RESET audit record (bot
+    // "system", v22) must never become a phantom leaderboard row with
+    // a fake $10,000 book; genuine bot events always match a config
+    // name, because the runners emit bot.name from the same files.
+    if (!stats) continue;
     if (event.type === "open") {
       stats.opens += 1;
       stats.trades += 1;

@@ -850,6 +850,36 @@ body {
   background: rgba(63, 185, 80, 0.22);
 }
 
+/* Reset All Data (v22): amber outline — destructive like the kill
+   actions, but deliberately not a third red clone. */
+.btn.reset-all {
+  border-color: #a97b0f;
+  color: #f0b429;
+  background: rgba(240, 180, 41, 0.08);
+}
+
+.btn.reset-all:hover:not(:disabled) {
+  background: rgba(240, 180, 41, 0.18);
+}
+
+/* The typed-RESET gate inside the reset confirmation modal. */
+.reset-type-input {
+  background: #0d1424;
+  color: #e6edf3;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 14px;
+  letter-spacing: 2px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 14px;
+}
+
+.reset-type-input::placeholder {
+  color: #5f7189;
+}
+
 .halt-banner {
   border: 1px solid #f85149;
   background: rgba(248, 81, 73, 0.14);

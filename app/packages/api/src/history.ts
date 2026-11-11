@@ -345,8 +345,33 @@ export class EventHistoryStore {
         this.recent.splice(0, this.recent.length - RECENT_CAP);
       }
       this.dirty = true;
+      // The DATA_RESET audit record (v22) is the one recent-class
+      // event that must never sit in the dirty buffer: it is the
+      // record that a wipe happened — the sole survivor of one — so
+      // it persists immediately, exactly like a decision record.
+      if (stored.type === "data_reset") this.flush();
     }
     return stored;
+  }
+
+  /**
+   * Reset All Data (v22): wipe every retained event and restart the
+   * sequence at 1, so the engine's DATA_RESET audit event becomes
+   * seq 1 — the sole first entry of the fresh history. Flushed
+   * immediately: a wipe must be durable the moment it is effected,
+   * never left sitting in the dirty buffer where a crash could
+   * resurrect the wiped record.
+   */
+  reset(): void {
+    this.protectedDecisions = [];
+    this.simDecisions = [];
+    this.recent = [];
+    this.nextSeq = 1;
+    this.dirty = true;
+    this.flush();
+    console.log(
+      "[history] event history wiped by Reset All Data — sequence restarts at 1",
+    );
   }
 
   /** Highest sequence number assigned so far (0 when empty). */

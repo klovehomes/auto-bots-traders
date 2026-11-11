@@ -58,6 +58,10 @@ const EVENT_HISTORY_PATH =
  *  answering with a still-pending report (the report completes over the
  *  WebSocket when it lands). The sim engine polls every 1 s. */
 const LIQUIDATION_WAIT_MS = 10_000;
+/** Same contract for a Reset All Data POST (v22): paper runners apply
+ *  on their next ≤30 s tick, so a still-pending answer is normal there;
+ *  sim applies within about a second. */
+const RESET_WAIT_MS = 10_000;
 
 async function main(): Promise<void> {
   const app = Fastify({ logger: true });
@@ -215,6 +219,49 @@ async function main(): Promise<void> {
     };
   }
 
+  /**
+   * Reset All Data (v22). Distinct from runAction() because the wipe
+   * has an API-side half: the moment the reset is accepted, the event
+   * history store is cleared (and its sequence restarted) here, while
+   * the engine wipes the bot books and reports completion. The team
+   * is halted by applyFleetReset() and STAYS halted — resuming is a
+   * separate deliberate action, exactly like after a kill.
+   */
+  async function runReset() {
+    const entry = control.applyFleetReset("web-ui");
+    if (entry) {
+      historyStore.reset();
+      broadcastControl(entry);
+      const done = await control.waitForReset(entry.id, RESET_WAIT_MS);
+      if (done?.reset?.status === "complete") {
+        broadcastControl(done);
+        return {
+          ok: true,
+          changed: done.changed,
+          entry: done,
+          reset: done.reset,
+          state: control.publicState(),
+        };
+      }
+      return {
+        ok: true,
+        changed: entry.changed,
+        entry,
+        reset: entry.reset,
+        resetNote:
+          "reset accepted and the team is halted; the engine is wiping the bot books and completion arrives over the WebSocket",
+        state: control.publicState(),
+      };
+    }
+    return {
+      ok: true,
+      changed: [] as string[],
+      noop: true,
+      entry: null,
+      state: control.publicState(),
+    };
+  }
+
   const BOT_ACTIONS: Record<string, ControlAction> = {
     kill: "kill",
     "kill-liquidate": "kill-liquidate",
@@ -239,6 +286,9 @@ async function main(): Promise<void> {
   app.post<{ Params: { action: string } }>(
     "/control/fleet/:action",
     async (request, reply) => {
+      // Reset is fleet-only and has its own handler (see runReset);
+      // the bot-scoped route below 404s it like any unknown action.
+      if (request.params.action === "reset") return runReset();
       const mapped = BOT_ACTIONS[request.params.action];
       if (!mapped) return reply.code(404).send({ error: "unknown action" });
       return runAction(() => control.applyFleetAction(mapped, "web-ui"));
@@ -298,6 +348,27 @@ async function main(): Promise<void> {
     );
     if (!entry) {
       return reply.code(404).send({ error: "unknown or already-reported liquidation" });
+    }
+    broadcastControl(entry);
+    return { ok: true };
+  });
+
+  // The engine reports that a Reset All Data (v22) has been fully
+  // executed — every book wiped, state files reinitialized, and the
+  // DATA_RESET audit event posted. Same internal-token trust pattern
+  // as the liquidation report; unknown ids 404 (idempotent retries
+  // after a successful report get the same 404 and stop).
+  app.post("/internal/control/reset-report", async (request, reply) => {
+    if (request.headers["x-internal-token"] !== INTERNAL_EVENT_TOKEN) {
+      return reply.code(401).send({ error: "invalid internal token" });
+    }
+    const body = request.body as { id?: string } | null;
+    if (!body?.id) {
+      return reply.code(400).send({ error: "missing reset id" });
+    }
+    const entry = control.completeReset(body.id);
+    if (!entry) {
+      return reply.code(404).send({ error: "unknown or already-reported reset" });
     }
     broadcastControl(entry);
     return { ok: true };

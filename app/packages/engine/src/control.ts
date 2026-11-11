@@ -27,6 +27,13 @@ export interface PendingLiquidation {
   requestedAt: string;
 }
 
+/** A Reset All Data in flight (v22), fleet scope. See api/src/control.ts. */
+export interface PendingReset {
+  id: string;
+  auditId: string;
+  requestedAt: string;
+}
+
 export interface LiquidationClose {
   codename: string;
   symbol: string;
@@ -51,6 +58,24 @@ export interface ControlClient {
     closed: LiquidationClose[],
     failed: LiquidationFailure[],
   ) => Promise<void>;
+  /**
+   * The in-flight Reset All Data (v22), or null. A non-consuming peek
+   * (unlike drainLiquidations): several runners plus the coordinator
+   * all need to observe the same pending reset.
+   */
+  pendingReset: () => PendingReset | null;
+  /** Record that one bot's runner has applied the reset (idempotent
+   *  per bot — the coordinator waits for every active bot). */
+  noteResetApplied: (id: string, codename: string) => void;
+  /** Codenames that have applied the given reset so far. */
+  resetAppliedBy: (id: string) => string[];
+  /**
+   * Report the reset fully executed. Returns true once the API has
+   * accepted the report — including a 404 ("unknown or already
+   * reported"), which means a previous attempt landed and retries
+   * should stop. False means: keep the pending reset and retry.
+   */
+  reportReset: (id: string) => Promise<boolean>;
   start: () => void;
 }
 
@@ -73,6 +98,9 @@ interface ControlClientOptions {
 export function createControlClient(opts: ControlClientOptions): ControlClient {
   const halted = new Map<string, boolean>();
   let pending: PendingLiquidation[] = [];
+  let currentReset: PendingReset | null = null;
+  /** Reset id → codenames whose runners have applied it (v22). */
+  const resetApplied = new Map<string, Set<string>>();
   const consumed = new Set<string>();
   let everPolled = false;
   let lastErrorLogAt = 0;
@@ -86,6 +114,7 @@ export function createControlClient(opts: ControlClientOptions): ControlClient {
       const state = (await res.json()) as {
         bots: Record<string, { halted: boolean }>;
         pending: PendingLiquidation[];
+        pendingReset?: PendingReset | null;
         desiredMode?: FleetMode;
       };
       opts.onControlState?.(state);
@@ -97,6 +126,8 @@ export function createControlClient(opts: ControlClientOptions): ControlClient {
         }
       }
       pending = state.pending;
+      // Tolerate an API that predates v22 (no pendingReset field).
+      currentReset = state.pendingReset ?? null;
       if (!everPolled) {
         everPolled = true;
         const haltedList = [...halted.entries()]
@@ -162,6 +193,53 @@ export function createControlClient(opts: ControlClientOptions): ControlClient {
       // request rather than losing it. (Positions are already closed in
       // the book, so a re-execution reports an empty book honestly.)
       consumed.delete(id);
+    },
+
+    pendingReset: () => currentReset,
+
+    noteResetApplied: (id, codename) => {
+      let set = resetApplied.get(id);
+      if (!set) {
+        set = new Set<string>();
+        resetApplied.set(id, set);
+      }
+      set.add(codename);
+    },
+
+    resetAppliedBy: (id) => [...(resetApplied.get(id) ?? [])],
+
+    reportReset: async (id) => {
+      const body = JSON.stringify({ id });
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch(
+            `${opts.apiBaseUrl}/internal/control/reset-report`,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-internal-token": opts.token,
+              },
+              body,
+            },
+          );
+          if (res.ok) return true;
+          // 404 = the API no longer knows this reset (already
+          // reported by an earlier attempt, or its state was reset):
+          // the report's job is done either way — stop retrying.
+          if (res.status === 404) return true;
+          console.warn(
+            `[engine] reset report rejected: HTTP ${res.status}`,
+          );
+        } catch (err) {
+          console.warn(
+            `[engine] reset report failed (attempt ${attempt}):`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 500 * attempt));
+      }
+      return false;
     },
 
     start: () => {

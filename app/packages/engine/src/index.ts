@@ -1,4 +1,12 @@
 import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname } from "node:path";
+import {
   describeKeysStatus,
   getPaperKeys,
   loadBots,
@@ -7,7 +15,7 @@ import {
   type FleetEvent,
 } from "@fleet/shared";
 import { checkAlpacaPaperConnection, createAlpacaClient } from "./alpaca.js";
-import { createControlClient } from "./control.js";
+import { createControlClient, type ControlClient } from "./control.js";
 import { createKalshiClient } from "./kalshi.js";
 import { createModeSupervisor, resolveBootMode } from "./mode.js";
 import { createControlRouter, startPaperTrader } from "./paper.js";
@@ -27,6 +35,30 @@ const MODE_STATE_PATH =
   process.env.MODE_STATE_PATH ?? "data/mode-state.json";
 const EVENT_INTERVAL_MS = 5000;
 const FIRST_EVENT_DELAY_MS = 1000;
+/**
+ * Reset All Data (v22): where the coordinator persists its per-reset
+ * progress (which reset id it owns, whether the DATA_RESET audit
+ * event has been emitted). On the shared data volume in Docker, like
+ * every other fleet state file — a restart mid-reset reads it back
+ * and finishes the job instead of double-applying or double-emitting.
+ */
+const RESET_PROGRESS_PATH =
+  process.env.RESET_PROGRESS_PATH ?? "data/reset-progress.json";
+/**
+ * The five paper runners' state files (same env names and defaults
+ * the runners themselves use). The coordinator deletes them when a
+ * reset starts: in paper mode each runner rewrites its own file
+ * fresh when it applies the reset, and in sim/connected mode the
+ * deletion stops a stale paper book from resurrecting if the fleet
+ * later boots in paper mode.
+ */
+const PAPER_STATE_PATHS: readonly string[] = [
+  process.env.PAPER_STATE_PATH ?? "data/paper-trendia-state.json",
+  process.env.SNAPBACK_STATE_PATH ?? "data/paper-snapback-state.json",
+  process.env.VEGA_STATE_PATH ?? "data/paper-vega-state.json",
+  process.env.WESLEY_STATE_PATH ?? "data/paper-wesley-state.json",
+  process.env.POLYCRYPT_STATE_PATH ?? "data/paper-polycrypt-state.json",
+];
 
 /**
  * Runner registry — as of Phase 12 (v21) every bot has a real paper
@@ -135,6 +167,18 @@ async function main(): Promise<void> {
   });
   control.start();
   modeSupervisor.startReporting();
+
+  // Reset All Data coordinator (v22): watches the control poll for a
+  // pending reset, deletes the on-disk paper state files, waits until
+  // every book-owning runner (or the simulator) has applied the wipe,
+  // then posts the single DATA_RESET audit event and reports
+  // completion to the API. Runs in every mode — in "connected" mode
+  // there are no books to wipe, so it finalizes immediately (the
+  // state-file deletion still applies). See startResetCoordinator.
+  startResetCoordinator({
+    control,
+    expected: mode === "connected" ? [] : active.map((b) => b.codename),
+  });
 
   if (mode === "sim") {
     // Local fake-data mode: no broker, no keys, no real market data.
@@ -267,6 +311,126 @@ async function main(): Promise<void> {
     }
     startSimulator(active, postEvent, control);
   }
+}
+
+/**
+ * Reset All Data coordinator (v22).
+ *
+ * The API owns the reset request (a durable pending flag in the
+ * control state, set when the user confirms in the dashboard); this
+ * coordinator is the engine half of the handshake:
+ *
+ * 1. On first sight of a new pending reset id: delete the five paper
+ *    state files from disk (see PAPER_STATE_PATHS above) and record
+ *    ownership in the progress marker. Runners rewrite their files
+ *    fresh when they apply; the marker makes a mid-reset engine
+ *    restart resume ownership instead of re-deleting files a runner
+ *    has already rewritten.
+ * 2. Each book owner — a paper runner's tick, or the simulator —
+ *    applies the wipe itself (fresh boot state, own orders cancelled)
+ *    and notes application on the control client. A runner applies a
+ *    given id at most once (its own lastResetId guard), and the sim
+ *    likewise, so application is idempotent end to end.
+ * 3. Once every expected codename has noted application, post the
+ *    ONE audit event (type "data_reset", bot "system", decision_id
+ *    null) — the API's history was cleared when the reset was
+ *    accepted, so this becomes seq 1, the sole first entry of the
+ *    fresh history — then report completion. The marker records
+ *    eventEmitted BEFORE the report attempt, so a crash between the
+ *    two can never double-emit; the report itself retries on later
+ *    ticks until the API accepts it (its pending flag persists until
+ *    then, so nothing is lost).
+ *
+ * Broker caveat: nothing here closes positions at Alpaca or Kalshi.
+ * The wipe is app data only; open broker paper positions become
+ * untracked ("foreign") and are ignored by state-only reconcile.
+ */
+function startResetCoordinator(deps: {
+  control: ControlClient;
+  /** Codenames whose book owners must apply the reset (empty in
+   *  connected mode — no books exist there). */
+  expected: readonly string[];
+}): void {
+  let handledId: string | null = null;
+  let eventEmitted = false;
+  try {
+    const raw = JSON.parse(readFileSync(RESET_PROGRESS_PATH, "utf8")) as {
+      id?: unknown;
+      eventEmitted?: unknown;
+    };
+    if (typeof raw.id === "string") {
+      handledId = raw.id;
+      eventEmitted = raw.eventEmitted === true;
+    }
+  } catch {
+    // No marker yet (first boot, or an unreadable file): start clean.
+  }
+
+  const persistMarker = (): void => {
+    try {
+      mkdirSync(dirname(RESET_PROGRESS_PATH), { recursive: true });
+      const tmp = `${RESET_PROGRESS_PATH}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ id: handledId, eventEmitted }));
+      renameSync(tmp, RESET_PROGRESS_PATH);
+    } catch (err) {
+      console.warn(
+        "[engine] could not persist the reset progress marker:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  };
+
+  const tick = async (): Promise<void> => {
+    const pending = deps.control.pendingReset();
+    if (!pending) return;
+
+    if (pending.id !== handledId) {
+      handledId = pending.id;
+      eventEmitted = false;
+      persistMarker();
+      for (const p of PAPER_STATE_PATHS) {
+        try {
+          unlinkSync(p);
+          console.log(`[engine] DATA RESET ${pending.id}: removed paper state file ${p}`);
+        } catch {
+          // Absent is the common case — nothing to remove.
+        }
+      }
+      console.log(
+        `[engine] DATA RESET ${pending.id}: in progress — waiting for ${deps.expected.length} book(s) to apply the wipe`,
+      );
+    }
+
+    const applied = new Set(deps.control.resetAppliedBy(pending.id));
+    if (!deps.expected.every((c) => applied.has(c))) return;
+
+    if (!eventEmitted) {
+      await postEvent({
+        bot: "system",
+        type: "data_reset",
+        decision_id: null,
+        symbol: null,
+        side: null,
+        qty: null,
+        price: null,
+        pnl: null,
+        reason:
+          "DATA_RESET · Reset All Data executed — trade history wiped; every book restored to its $10,000 initial allocation; per-bot state reinitialized. Broker-side paper positions were NOT closed and are now untracked. The team stays halted until resumed.",
+        ts: new Date().toISOString(),
+      });
+      eventEmitted = true;
+      persistMarker();
+    }
+
+    if (await deps.control.reportReset(pending.id)) {
+      console.log(
+        `[engine] DATA RESET ${pending.id}: complete — books wiped, team remains HALTED until resumed`,
+      );
+    }
+  };
+
+  setInterval(() => void tick(), 1000);
+  void tick();
 }
 
 /** Phase 0 test emitter, retained for MODE=connected guardrail runs. */

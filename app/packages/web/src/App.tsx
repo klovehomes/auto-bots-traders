@@ -41,10 +41,13 @@ export interface AuditEntry {
   scope: "bot" | "fleet";
   /** Bot codename for scope="bot"; null for fleet actions. */
   target: string | null;
-  action: "kill" | "kill-liquidate" | "resume";
+  action: "kill" | "kill-liquidate" | "resume" | "reset";
   source: string;
   changed: string[];
   liquidation?: LiquidationReport;
+  /** Present on fleet reset entries (v22): pending until the engine
+   *  reports the wipe complete. */
+  reset?: { status: "pending" | "complete" };
 }
 
 export interface ControlState {
@@ -55,6 +58,8 @@ export interface ControlState {
   anyHalted: boolean;
   allHalted: boolean;
   audit: AuditEntry[];
+  /** True while a Reset All Data (v22) is still being executed. */
+  pendingReset: boolean;
 }
 
 interface ControlMessage {
@@ -119,6 +124,10 @@ export function describeControl(
             ? ` · ${liq.failed.length} could not be closed`
             : "");
   if (entry.scope === "fleet") {
+    if (entry.action === "reset")
+      return entry.reset?.status === "complete"
+        ? "🧹 TEAM DATA RESET — history wiped, books back to $10,000, team halted"
+        : "🧹 TEAM DATA RESET — wiping history and books…";
     if (entry.action === "kill") return "⛔⛔ TEAM KILL — all bots halted";
     if (entry.action === "resume") return "▶▶ TEAM RESUMED — all bots trading";
     return `⛔⛔ TEAM KILL + LIQUIDATE${liqText}`;
@@ -250,6 +259,12 @@ export function App() {
     label: string;
     positions: number;
   } | null>(null);
+  // Reset All Data confirmation (v22): the modal stays open until
+  // cancelled or confirmed, and its confirm button is disabled until
+  // the user types RESET — a wipe gets a stronger gate than a
+  // liquidate's single click.
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [resetText, setResetText] = useState("");
 
   const effectsRef = useRef<EffectEvent[]>([]);
   /** Sequence numbers already in state (Phase 6): live frames and
@@ -305,6 +320,42 @@ export function App() {
     haltedRef.current = haltedNames;
   }, [haltedNames]);
 
+  /**
+   * After a Reset All Data (v22) the API's history restarts its
+   * sequence at 1, so every seq this tab has seen is stale: drop the
+   * local stream and reseed from the fresh history (which holds just
+   * the DATA_RESET audit record until trading resumes). The merge is
+   * the same seq-based dedupe as the load-time seed, so a live frame
+   * that beats the fetch back is kept exactly once.
+   */
+  function reseedAfterReset(): void {
+    seenSeqRef.current.clear();
+    setEvents([]);
+    fetch(`${API_BASE}/events/history`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<EventHistoryResponse>;
+      })
+      .then((data) => {
+        const fresh = data.events.filter((e) => {
+          if (typeof e.seq !== "number") return true;
+          if (seenSeqRef.current.has(e.seq)) return false;
+          seenSeqRef.current.add(e.seq);
+          return true;
+        });
+        if (fresh.length === 0) return;
+        setEvents((prev) =>
+          trimEvents(
+            [...prev, ...fresh].sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0)),
+          ),
+        );
+      })
+      .catch(() => {
+        // Best-effort: the live stream still delivers the DATA_RESET
+        // record and everything after it.
+      });
+  }
+
   /** Merge an audit entry into the stream's control log (insert new,
    *  or replace in place when a liquidation report completes it). */
   function mergeAuditEntry(entry: AuditEntry): void {
@@ -332,6 +383,7 @@ export function App() {
       };
       if (data.state) setControl(data.state);
       if (data.entry) mergeAuditEntry(data.entry);
+      if (data.entry?.action === "reset") reseedAfterReset();
     } catch {
       // The WebSocket broadcast / next /control fetch reconciles state;
       // a failed POST simply leaves the previous state on screen.
@@ -389,6 +441,23 @@ export function App() {
         ? `/control/fleet/kill-liquidate`
         : `/control/bots/${c.codename}/kill-liquidate`,
     );
+  }
+
+  // Reset All Data (v22) is arm-gated exactly like the kill actions —
+  // the button is disabled while disarmed and this handler refuses
+  // too — and firing it consumes the arm like any kill action.
+  function askResetAll(): void {
+    if (!killArmed) return;
+    setResetText("");
+    setConfirmReset(true);
+  }
+  function confirmResetNow(): void {
+    if (!confirmReset || !killArmed) return;
+    // The modal's confirm button enforces this too; defense in depth.
+    if (resetText.trim() !== "RESET") return;
+    setConfirmReset(false);
+    setKillArmed(false);
+    void postControl(`/control/fleet/reset`);
   }
 
   // --- Mode switch (Phase 5) ------------------------------------------
@@ -590,6 +659,9 @@ export function App() {
           const msg = parsed as ControlMessage;
           setControl(msg.state);
           if (msg.entry) mergeAuditEntry(msg.entry);
+          // A reset broadcast (from any open dashboard) restarts the
+          // history sequence — reseed this tab's stream too.
+          if (msg.entry?.action === "reset") reseedAfterReset();
           return;
         }
         if ((parsed as ModeMessage).kind === "mode") {
@@ -840,6 +912,7 @@ export function App() {
                 : control.anyHalted
                   ? `${haltedNames.size} of ${bots.length} bots halted`
                   : "all bots active"}
+            {control?.pendingReset ? " · 🧹 DATA RESET IN PROGRESS" : ""}
           </span>
         </div>
         <div className="control-arm">
@@ -882,6 +955,13 @@ export function App() {
             disabled={controlBusy || !control || !killArmed}
           >
             ⛔ Kill + liquidate all
+          </button>
+          <button
+            className="btn reset-all"
+            onClick={askResetAll}
+            disabled={controlBusy || !control || !killArmed}
+          >
+            🧹 Reset all data
           </button>
         </div>
       </section>
@@ -1031,7 +1111,11 @@ export function App() {
                             <BotAvatar bot={entryBot} name={entryBot.name} />
                           ) : (
                             <span className="system-icon" aria-hidden="true">
-                              {entry.action === "resume" ? "▶" : "⛔"}
+                              {entry.action === "resume"
+                                ? "▶"
+                                : entry.action === "reset"
+                                  ? "🧹"
+                                  : "⛔"}
                             </span>
                           )}
                           <span className="event-main">
@@ -1209,6 +1293,74 @@ export function App() {
                 {controlBusy
                   ? "Liquidating…"
                   : "Yes — kill + liquidate"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmReset && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setConfirmReset(false)}
+        >
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Confirm reset all data"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-head">
+              <h3>🧹 Reset ALL data?</h3>
+              <button
+                className="modal-close"
+                onClick={() => setConfirmReset(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <p className="confirm-text">
+              This <strong>halts the whole team</strong>, wipes the trade
+              history back to blank, and returns every bot's book to its{" "}
+              <strong>$10,000 starting amount</strong> — positions in the
+              app's books and realized P&amp;L counters are erased, and
+              the per-bot state files are reinitialized. The team stays{" "}
+              <strong>halted</strong> afterwards; nothing trades until you
+              Resume. The run mode (Simulator / Paper) and your keys file
+              are not touched.
+            </p>
+            <p className="confirm-text">
+              ⚠️ This resets <strong>app data only</strong> — it does NOT
+              close positions at Alpaca or Kalshi. Any paper positions
+              still open at the broker become untracked and are ignored
+              by the app from then on.
+            </p>
+            <p className="confirm-text">
+              Type <strong>RESET</strong> to confirm:
+            </p>
+            <input
+              className="reset-type-input"
+              type="text"
+              value={resetText}
+              onChange={(e) => setResetText(e.target.value)}
+              placeholder="RESET"
+              aria-label="Type RESET to confirm"
+              autoFocus
+            />
+            <div className="confirm-actions">
+              <button
+                className="btn"
+                onClick={() => setConfirmReset(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn reset-all"
+                onClick={confirmResetNow}
+                disabled={controlBusy || resetText.trim() !== "RESET"}
+              >
+                {controlBusy ? "Resetting…" : "Yes — reset all data"}
               </button>
             </div>
           </div>

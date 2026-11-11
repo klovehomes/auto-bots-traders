@@ -64,6 +64,15 @@ export interface PaperControl {
   isHalted: (codename: string) => boolean;
   drainLiquidations: () => PendingLiquidation[];
   reportLiquidation: ControlClient["reportLiquidation"];
+  /**
+   * Reset All Data (v22). Optional so control doubles written before
+   * v22 (older harnesses) still satisfy the interface; production
+   * wiring (createControlRouter below) always provides both. A runner
+   * peeks pendingReset() each tick and, on a new id, cancels its own
+   * open orders, swaps in a fresh boot state, and notes application.
+   */
+  pendingReset?: ControlClient["pendingReset"];
+  noteResetApplied?: ControlClient["noteResetApplied"];
 }
 
 interface TrackedEntry {
@@ -262,6 +271,8 @@ export function startPaperTrader(
 
   let haltCancelHandled = false;
   let booted = false;
+  /** The last Reset All Data id this runner applied (v22 idempotency). */
+  let lastResetId: string | null = null;
 
   /**
    * Cancel this bot's OWN open broker orders (kill switch: pending
@@ -615,6 +626,27 @@ export function startPaperTrader(
 
   async function tick(): Promise<void> {
     try {
+      // Reset All Data (v22): checked first, before liquidations and
+      // polls, so nothing from the old book can act or report into
+      // the fresh history. Idempotent per reset id. Broker caveat:
+      // this wipes the APP book only — positions open at the broker
+      // are NOT closed; they become untracked ("foreign") and the
+      // state-only reconcile ignores them from here on.
+      const pendingReset = control.pendingReset?.();
+      if (pendingReset && pendingReset.id !== lastResetId) {
+        lastResetId = pendingReset.id;
+        await cancelOpenOrders().catch(() => {});
+        state = freshState();
+        haltCancelHandled = false;
+        booted = false;
+        save();
+        control.noteResetApplied?.(pendingReset.id, bot.codename);
+        console.log(
+          `[paper] ${bot.name}: DATA RESET applied — book wiped back to the $${STARTING_CAPITAL} start; app positions erased (broker-side positions untouched, now untracked)`,
+        );
+        return;
+      }
+
       await handleLiquidations();
       await pollPending();
 
@@ -692,6 +724,10 @@ export function createControlRouter(control: ControlClient): {
     isHalted: control.isHalted,
     drainLiquidations: () => take(pred),
     reportLiquidation: control.reportLiquidation,
+    // Reset is fleet-wide, not per-bot: every view sees the same
+    // pending reset and notes application for its own codename(s).
+    pendingReset: control.pendingReset,
+    noteResetApplied: control.noteResetApplied,
   });
   return {
     forBot: (codename) => view((p) => p.codename === codename),

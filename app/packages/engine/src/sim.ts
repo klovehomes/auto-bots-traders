@@ -110,6 +110,13 @@ type PositionKind = "stock" | "crypto" | "prob" | "optionLong" | "shortPremium";
 export interface SimControl {
   isHalted: (codename: string) => boolean;
   drainLiquidations: () => { id: string; codename: string }[];
+  /**
+   * Reset All Data (v22). Optional so control doubles written before
+   * v22 still satisfy the interface; production wiring (the engine's
+   * ControlClient, directly or via the control router) provides both.
+   */
+  pendingReset?: () => { id: string } | null;
+  noteResetApplied?: (id: string, codename: string) => void;
   reportLiquidation: (
     id: string,
     codename: string,
@@ -169,6 +176,8 @@ export function startSimulator(
   const rng = mulberry32(0x5eed);
   const prices = new Map<string, PriceSeries>();
   let decisionCounter = 0;
+  /** The last Reset All Data id the simulator applied (v22). */
+  let lastResetId: string | null = null;
 
   const series = (key: string): PriceSeries => {
     let s = prices.get(key);
@@ -488,6 +497,30 @@ export function startSimulator(
     // The engine owns the position book, so it performs the forced
     // closes itself and reports the results back to the API.
     if (control) {
+      // Reset All Data (v22) outranks liquidations: wipe every sim
+      // book back to the start equity, erase positions, and restart
+      // the decision counter (sim decision ids are the sim books' own
+      // numbering — a blank history restarts them too). Idempotent
+      // per reset id. The team stays halted afterwards (the API owns
+      // the halt); a deliberate resume restarts trading from here.
+      const pendingReset = control.pendingReset?.();
+      if (pendingReset && pendingReset.id !== lastResetId) {
+        lastResetId = pendingReset.id;
+        for (const s of states) {
+          s.equity = SIM_START_EQUITY;
+          s.positions = [];
+          s.polyToggle = false;
+          s.nextActionAt = now + 1000;
+        }
+        decisionCounter = 0;
+        for (const s of states) {
+          control.noteResetApplied?.(pendingReset.id, s.bot.codename);
+        }
+        console.log(
+          `[sim] DATA RESET applied — all sim books wiped back to $${SIM_START_EQUITY}, positions erased`,
+        );
+      }
+
       for (const req of control.drainLiquidations()) {
         const state = states.find((s) => s.bot.codename === req.codename);
         if (!state) {

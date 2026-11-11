@@ -83,6 +83,10 @@ services:
       # dashboard flips the switch, this engine exits and the restart
       # policy below relaunches it into the stored mode.
       MODE_STATE_PATH: /data/mode-state.json
+      # v22: the Reset All Data coordinator's progress marker lives on
+      # the same durable volume, so a mid-reset engine restart resumes
+      # the wipe instead of double-applying it.
+      RESET_PROGRESS_PATH: /data/reset-progress.json
     volumes:
       - ../bots:/bots:ro
       - fleet-data:/data

@@ -48,8 +48,13 @@ export interface BotConfig {
   raw: Record<string, unknown>;
 }
 
-/** Event types in the engine → frontend stream (see PLAN.md). */
-export type FleetEventType = "open" | "close" | "signal" | "halt";
+/** Event types in the engine → frontend stream (see PLAN.md).
+ *  "data_reset" (Phase 13 / v22) is the engine's audit record of a
+ *  Reset All Data wipe: it is the sole first entry of the fresh event
+ *  history after a reset, carries bot "system" and a null decision_id
+ *  (so it lands in the history store's recent class), and never enters
+ *  any bot's PnL math. */
+export type FleetEventType = "open" | "close" | "signal" | "halt" | "data_reset";
 
 /**
  * Fleet-wide run mode, from the MODE env var. This is the production
