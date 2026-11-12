@@ -1,4 +1,10 @@
-import type { BotConfig, FleetEvent } from "@fleet/shared/types";
+import type {
+  BotConfig,
+  FleetEvent,
+  MarketWeather,
+  WeatherKind,
+} from "@fleet/shared/types";
+import { weatherIntensity } from "@fleet/shared/weather";
 
 /**
  * Client-side aggregation over the event stream.
@@ -80,11 +86,13 @@ export function computeStats(
 
   const chronological = [...events].reverse();
   for (const event of chronological) {
-    let stats = map.get(event.bot);
-    if (!stats) {
-      stats = emptyStats(event.bot);
-      map.set(event.bot, stats);
-    }
+    const stats = map.get(event.bot);
+    // Events from names outside the current bot config are ignored.
+    // Most importantly, the engine's DATA_RESET audit record (bot
+    // "system", v22) must never become a phantom leaderboard row with
+    // a fake $10,000 book; genuine bot events always match a config
+    // name, because the runners emit bot.name from the same files.
+    if (!stats) continue;
     if (event.type === "open") {
       stats.opens += 1;
       stats.trades += 1;
@@ -169,6 +177,30 @@ export function momentumAt(stats: BotStats, now: number): number {
     sum += close.pnl * Math.exp(-ageSec / 45);
   }
   return Math.tanh(sum / 120);
+}
+
+/**
+ * Market weather → dome particle mode (v24). The landscape reads this
+ * every frame from the latest weather payload: which particle system
+ * is active (green sparklies vs red meteors) and how busy it is.
+ * Before the engine's first report arrives (payload null) the dome
+ * shows the calm default — breakout at the intensity floor — so the
+ * scene never looks broken on static/showcase data.
+ */
+export interface WeatherMode {
+  kind: WeatherKind;
+  /** Particle activity in [0.15, 1] — see weatherIntensity. */
+  intensity: number;
+  spyChangePct: number;
+}
+
+export function weatherModeFor(weather: MarketWeather | null | undefined): WeatherMode {
+  if (!weather) return { kind: "breakout", intensity: weatherIntensity(0), spyChangePct: 0 };
+  return {
+    kind: weather.kind,
+    intensity: weatherIntensity(weather.spyChangePct),
+    spyChangePct: weather.spyChangePct,
+  };
 }
 
 /** "$1,234.56" / "-$42.17" formatting used across the page. */

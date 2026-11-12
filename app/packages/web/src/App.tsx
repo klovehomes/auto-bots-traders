@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { BotConfig, FleetEvent, FleetMode } from "@fleet/shared/types";
+import type {
+  BotConfig,
+  FleetEvent,
+  FleetMode,
+  MarketWeather,
+} from "@fleet/shared/types";
 import {
   Landscape,
   type EffectEvent,
@@ -9,6 +14,7 @@ import {
 import { SplitView, YourSelectionsTab } from "./SplitView.js";
 import { GateScreen } from "./GateScreen.js";
 import { BotAvatar } from "./avatars.js";
+import { BUILD_VERSION } from "./version.js";
 import {
   computeStats,
   computeTotals,
@@ -40,10 +46,13 @@ export interface AuditEntry {
   scope: "bot" | "fleet";
   /** Bot codename for scope="bot"; null for fleet actions. */
   target: string | null;
-  action: "kill" | "kill-liquidate" | "resume";
+  action: "kill" | "kill-liquidate" | "resume" | "reset";
   source: string;
   changed: string[];
   liquidation?: LiquidationReport;
+  /** Present on fleet reset entries (v22): pending until the engine
+   *  reports the wipe complete. */
+  reset?: { status: "pending" | "complete" };
 }
 
 export interface ControlState {
@@ -54,6 +63,8 @@ export interface ControlState {
   anyHalted: boolean;
   allHalted: boolean;
   audit: AuditEntry[];
+  /** True while a Reset All Data (v22) is still being executed. */
+  pendingReset: boolean;
 }
 
 interface ControlMessage {
@@ -81,6 +92,27 @@ interface ModeMessage {
   state: ModeState;
 }
 
+// --- Market weather (v24, owned by the API — GET /weather) -----------
+interface WeatherMessage {
+  kind: "weather";
+  ts: string;
+  state: MarketWeather | null;
+}
+
+// --- Paper keys status (Phase 12 — GET /keys/status, presence only) --
+export interface ProviderKeyStatus {
+  loaded: boolean;
+  source: "file" | "env" | "none";
+  keyIdTail: string | null;
+  detail: string | null;
+}
+
+export interface KeysStatus {
+  keysFile: { path: string; exists: boolean };
+  alpaca: ProviderKeyStatus;
+  kalshi: ProviderKeyStatus & { env: string; refused: boolean };
+}
+
 const MODE_LABELS: Record<FleetMode, string> = {
   sim: "Simulator",
   paper: "Paper trading",
@@ -104,6 +136,10 @@ export function describeControl(
             ? ` · ${liq.failed.length} could not be closed`
             : "");
   if (entry.scope === "fleet") {
+    if (entry.action === "reset")
+      return entry.reset?.status === "complete"
+        ? "🧹 DATA RESET — history wiped, book back to $10,000, PolyCrypt9000 halted"
+        : "🧹 DATA RESET — wiping history and book…";
     if (entry.action === "kill") return "⛔⛔ KILL — PolyCrypt9000 halted";
     if (entry.action === "resume") return "▶▶ RESUMED — PolyCrypt9000 trading";
     return `⛔⛔ KILL + LIQUIDATE — PolyCrypt9000${liqText}`;
@@ -193,6 +229,12 @@ function Dashboard() {
   // engine's reported running mode). The header badge shows the
   // running mode when known, else the desired one.
   const [modeState, setModeState] = useState<ModeState | null>(null);
+  // Paper keys readout (Phase 12): presence only, from GET /keys/status.
+  const [keysStatus, setKeysStatus] = useState<KeysStatus | null>(null);
+  // Market weather (v24): the engine's SPY verdict via the API. Drives
+  // the dome's particle weather (through weatherRef, read per frame)
+  // and the overlay chip on the landscape.
+  const [weather, setWeather] = useState<MarketWeather | null>(null);
   // A mode the user picked in the dropdown but hasn't confirmed yet.
   const [modeChoice, setModeChoice] = useState<FleetMode | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
@@ -233,6 +275,12 @@ function Dashboard() {
     label: string;
     positions: number;
   } | null>(null);
+  // Reset All Data confirmation (v22): the modal stays open until
+  // cancelled or confirmed, and its confirm button is disabled until
+  // the user types RESET — a wipe gets a stronger gate than a
+  // liquidate's single click.
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [resetText, setResetText] = useState("");
 
   const effectsRef = useRef<EffectEvent[]>([]);
   /** Sequence numbers already in state (Phase 6): live frames and
@@ -244,6 +292,8 @@ function Dashboard() {
   const inspectControlRef = useRef<InspectControl | null>(null);
   /** Bot NAMES currently halted — the landscape reads this every frame. */
   const haltedRef = useRef<Set<string>>(new Set());
+  /** Latest market weather — the landscape reads this every frame. */
+  const weatherRef = useRef<MarketWeather | null>(null);
 
   function dismissInspect(): void {
     inspectControlRef.current?.dismiss();
@@ -288,6 +338,46 @@ function Dashboard() {
     haltedRef.current = haltedNames;
   }, [haltedNames]);
 
+  useEffect(() => {
+    weatherRef.current = weather;
+  }, [weather]);
+
+  /**
+   * After a Reset All Data (v22) the API's history restarts its
+   * sequence at 1, so every seq this tab has seen is stale: drop the
+   * local stream and reseed from the fresh history (which holds just
+   * the DATA_RESET audit record until trading resumes). The merge is
+   * the same seq-based dedupe as the load-time seed, so a live frame
+   * that beats the fetch back is kept exactly once.
+   */
+  function reseedAfterReset(): void {
+    seenSeqRef.current.clear();
+    setEvents([]);
+    fetch(`${API_BASE}/events/history`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<EventHistoryResponse>;
+      })
+      .then((data) => {
+        const fresh = data.events.filter((e) => {
+          if (typeof e.seq !== "number") return true;
+          if (seenSeqRef.current.has(e.seq)) return false;
+          seenSeqRef.current.add(e.seq);
+          return true;
+        });
+        if (fresh.length === 0) return;
+        setEvents((prev) =>
+          trimEvents(
+            [...prev, ...fresh].sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0)),
+          ),
+        );
+      })
+      .catch(() => {
+        // Best-effort: the live stream still delivers the DATA_RESET
+        // record and everything after it.
+      });
+  }
+
   /** Merge an audit entry into the stream's control log (insert new,
    *  or replace in place when a liquidation report completes it). */
   function mergeAuditEntry(entry: AuditEntry): void {
@@ -315,6 +405,7 @@ function Dashboard() {
       };
       if (data.state) setControl(data.state);
       if (data.entry) mergeAuditEntry(data.entry);
+      if (data.entry?.action === "reset") reseedAfterReset();
     } catch {
       // The WebSocket broadcast / next /control fetch reconciles state;
       // a failed POST simply leaves the previous state on screen.
@@ -374,6 +465,23 @@ function Dashboard() {
     );
   }
 
+  // Reset All Data (v22) is arm-gated exactly like the kill actions —
+  // the button is disabled while disarmed and this handler refuses
+  // too — and firing it consumes the arm like any kill action.
+  function askResetAll(): void {
+    if (!killArmed) return;
+    setResetText("");
+    setConfirmReset(true);
+  }
+  function confirmResetNow(): void {
+    if (!confirmReset || !killArmed) return;
+    // The modal's confirm button enforces this too; defense in depth.
+    if (resetText.trim() !== "RESET") return;
+    setConfirmReset(false);
+    setKillArmed(false);
+    void postControl(`/control/fleet/reset`);
+  }
+
   // --- Mode switch (Phase 5) ------------------------------------------
   // Picking a different mode in the header dropdown only stages it
   // (modeChoice); the inline Switch button fires POST /mode. The API
@@ -430,6 +538,55 @@ function Dashboard() {
       });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Market weather (v24): fetched once from GET /weather so a fresh
+  // dashboard shows the right sky immediately, then kept live by the
+  // WebSocket "weather" broadcasts (the engine re-judges hourly).
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/weather`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<MarketWeather | null>;
+      })
+      .then((data) => {
+        if (!cancelled) setWeather(data);
+      })
+      .catch(() => {
+        // Best-effort: the dome keeps its calm default until a
+        // broadcast or a later load delivers the weather.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Paper keys status (Phase 12): fetched once on load, refreshed on
+  // an interval — flipping keys means editing a file on the host, and
+  // the readout should notice without a dashboard reload. Presence
+  // only; the API never serves a secret value.
+  useEffect(() => {
+    let cancelled = false;
+    const load = (): void => {
+      fetch(`${API_BASE}/keys/status`)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json() as Promise<KeysStatus>;
+        })
+        .then((data) => {
+          if (!cancelled) setKeysStatus(data);
+        })
+        .catch(() => {
+          // Best-effort readout; absence renders as "unknown".
+        });
+    };
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
     };
   }, []);
 
@@ -541,11 +698,19 @@ function Dashboard() {
         const parsed = JSON.parse(String(message.data)) as
           | FleetEvent
           | ControlMessage
-          | ModeMessage;
+          | ModeMessage
+          | WeatherMessage;
+        if ((parsed as WeatherMessage).kind === "weather") {
+          setWeather((parsed as WeatherMessage).state);
+          return;
+        }
         if ((parsed as ControlMessage).kind === "control") {
           const msg = parsed as ControlMessage;
           setControl(msg.state);
           if (msg.entry) mergeAuditEntry(msg.entry);
+          // A reset broadcast (from any open dashboard) restarts the
+          // history sequence — reseed this tab's stream too.
+          if (msg.entry?.action === "reset") reseedAfterReset();
           return;
         }
         if ((parsed as ModeMessage).kind === "mode") {
@@ -649,6 +814,7 @@ function Dashboard() {
       <header className="header">
         <div>
           <h1>Prediction Markets Assistant</h1>
+          <p className="build-version">Build {BUILD_VERSION}</p>
           <p className="subtitle">
             Polymarket-only trader — Polymarket shadow sleeve + BTC / ETH / SOL breakout sleeve.
           </p>
@@ -702,6 +868,20 @@ function Dashboard() {
                 ⟳ Restarting the engine into {MODE_LABELS[desiredMode]}…
               </p>
             )}
+            <p className="keys-status" role="status">
+              Paper keys: Alpaca{" "}
+              {keysStatus === null
+                ? "…"
+                : keysStatus.alpaca.loaded
+                  ? `✓${keysStatus.alpaca.source !== "none" ? ` (${keysStatus.alpaca.source})` : ""}`
+                  : "✗"}{" "}
+              · Kalshi{" "}
+              {keysStatus === null
+                ? "…"
+                : keysStatus.kalshi.loaded
+                  ? `✓${keysStatus.kalshi.source !== "none" ? ` (${keysStatus.kalshi.source})` : ""}`
+                  : "✗"}
+            </p>
             {pendingMode && (
               <div
                 className="mode-confirm"
@@ -779,6 +959,7 @@ function Dashboard() {
               : control.anyHalted
                 ? "PolyCrypt9000 halted"
                 : "PolyCrypt9000 active"}
+            {control?.pendingReset ? " · 🧹 DATA RESET IN PROGRESS" : ""}
           </span>
         </div>
         <div className="control-arm">
@@ -822,6 +1003,13 @@ function Dashboard() {
           >
             ⛔ Kill + liquidate all
           </button>
+          <button
+            className="btn reset-all"
+            onClick={askResetAll}
+            disabled={controlBusy || !control || !killArmed}
+          >
+            🧹 Reset all data
+          </button>
         </div>
       </section>
 
@@ -837,7 +1025,10 @@ function Dashboard() {
 
       {/* Phase PM4: the Leaderboard view is gone — the split screen is
           the only main view. The bot landscape lives inside the Bot
-          Trades column; SplitView renders the node passed here. */}
+          Trades column; SplitView renders the node passed here.
+          PM8: the landscape also gets the v24 weather (weatherRef so
+          the dome renders breakout/downturn particles) and the
+          weather chip, carried over from the fleet layout. */}
       <section className="split-wrap" aria-label="Market scans and Bot Trades">
         {bots.length === 0 ? (
           <div className="landscape-fallback">
@@ -865,6 +1056,7 @@ function Dashboard() {
                     statsRef={statsRef}
                     effectsRef={effectsRef}
                     haltedRef={haltedRef}
+                    weatherRef={weatherRef}
                     onUnavailable={() => setWebglFailed(true)}
                     onInspect={(name, pinned) =>
                       setInspect(name ? { name, pinned } : null)
@@ -872,6 +1064,19 @@ function Dashboard() {
                     inspectAnchorRef={inspectAnchorRef}
                     inspectControlRef={inspectControlRef}
                   />
+                )}
+                {weather && (
+                  <div
+                    className={`weather-chip ${weather.kind}`}
+                    title={`SPY weather as of ${fmtTimeFull(weather.asOf)} (${weather.source === "alpaca" ? "Alpaca paper feed" : "simulator"})`}
+                  >
+                    {weather.kind === "breakout"
+                      ? "✦ Breakout weather"
+                      : "☄ Downturn weather"}
+                    {" · SPY "}
+                    {weather.spyChangePct >= 0 ? "+" : "-"}
+                    {Math.abs(weather.spyChangePct).toFixed(2)}%
+                  </div>
                 )}
               </div>
             }
@@ -978,7 +1183,11 @@ function Dashboard() {
                             <BotAvatar bot={entryBot} name={entryBot.name} />
                           ) : (
                             <span className="system-icon" aria-hidden="true">
-                              {entry.action === "resume" ? "▶" : "⛔"}
+                              {entry.action === "resume"
+                                ? "▶"
+                                : entry.action === "reset"
+                                  ? "🧹"
+                                  : "⛔"}
                             </span>
                           )}
                           <span className="event-main">
@@ -1129,7 +1338,7 @@ function Dashboard() {
             <p className="confirm-text">
               This halts{" "}
               {confirmLiquidate.scope === "fleet"
-                ? "every bot on the team"
+                ? "PolyCrypt9000"
                 : confirmLiquidate.label}{" "}
               and immediately closes{" "}
               <strong>
@@ -1155,6 +1364,76 @@ function Dashboard() {
                 {controlBusy
                   ? "Liquidating…"
                   : "Yes — kill + liquidate"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmReset && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setConfirmReset(false)}
+        >
+          <div
+            className="modal confirm-modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Confirm reset all data"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-head">
+              <h3>🧹 Reset ALL data?</h3>
+              <button
+                className="modal-close"
+                onClick={() => setConfirmReset(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <p className="confirm-text">
+              This <strong>halts PolyCrypt9000</strong>, wipes the trade
+              history back to blank, and returns her book to its{" "}
+              <strong>$10,000 starting amount</strong> — positions in the
+              app's book and realized P&amp;L counters are erased, and
+              the state files are reinitialized. The shared-pool ledger
+              is wiped too: the Bot Trades allocation goes back to $0
+              and any booked user selections are cleared. PolyCrypt9000
+              stays <strong>halted</strong> afterwards; nothing trades
+              until you Resume. The run mode (Simulator / Paper) and
+              your keys file are not touched.
+            </p>
+            <p className="confirm-text">
+              ⚠️ This resets <strong>app data only</strong> — it does NOT
+              close positions at Alpaca or Kalshi. Any paper positions
+              still open at the broker become untracked and are ignored
+              by the app from then on.
+            </p>
+            <p className="confirm-text">
+              Type <strong>RESET</strong> to confirm:
+            </p>
+            <input
+              className="reset-type-input"
+              type="text"
+              value={resetText}
+              onChange={(e) => setResetText(e.target.value)}
+              placeholder="RESET"
+              aria-label="Type RESET to confirm"
+              autoFocus
+            />
+            <div className="confirm-actions">
+              <button
+                className="btn"
+                onClick={() => setConfirmReset(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn reset-all"
+                onClick={confirmResetNow}
+                disabled={controlBusy || resetText.trim() !== "RESET"}
+              >
+                {controlBusy ? "Resetting…" : "Yes — reset all data"}
               </button>
             </div>
           </div>

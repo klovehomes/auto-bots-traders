@@ -149,4 +149,19 @@ export class AllocationStore {
     this.save();
     return selections;
   }
+
+  /**
+   * Reset All Data (PM8): return the shared-pool ledger to its
+   * fresh-install state — bot allocation $0, all three sleeve
+   * toggles on, no booked user selections — and persist it. A reset
+   * that left booked selections against a $10,000 book would be
+   * incoherent, so the ledger is wiped with the books. Called by
+   * the API's runReset() the moment a reset is accepted.
+   */
+  reset(): void {
+    this.botAllocation = 0;
+    this.sleeveToggles = { ...DEFAULT_SLEEVE_TOGGLES };
+    this.userSelections = [];
+    this.save();
+  }
 }

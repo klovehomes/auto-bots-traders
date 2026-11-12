@@ -40,6 +40,13 @@ body {
   color: #8b98a9;
 }
 
+.build-version {
+  margin: 0 0 3px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: #8b98a9;
+}
+
 .header-badges {
   display: flex;
   flex-direction: column;
@@ -96,6 +103,14 @@ body {
   margin: 0;
   font-size: 12.5px;
   color: #f0b429;
+}
+
+.keys-status {
+  margin: 2px 0 0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #8b98a9;
+  text-align: right;
 }
 
 .mode-confirm {
@@ -248,12 +263,42 @@ body {
 
 /* ---------- Landscape ---------- */
 .landscape-wrap {
+  position: relative;
   border: 1px solid #1b2740;
   border-radius: 16px;
   overflow: hidden;
   background: #05070f;
   height: min(64vh, 660px);
   margin-bottom: 18px;
+}
+
+/* Market weather chip (v24): the dome's weather, in words, overlaid
+   on the landscape's top-left corner. Muted like the other readouts;
+   the tint follows the weather (win green / loss red). */
+.weather-chip {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 5;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid #1b2740;
+  background: rgba(5, 8, 18, 0.72);
+  color: #8b98a9;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.weather-chip.breakout {
+  border-color: rgba(47, 232, 154, 0.45);
+  color: #2fe89a;
+}
+
+.weather-chip.downturn {
+  border-color: rgba(255, 77, 66, 0.5);
+  color: #ff7a6e;
 }
 
 .landscape-canvas {
@@ -833,6 +878,36 @@ body {
 
 .btn.resume:hover:not(:disabled) {
   background: rgba(63, 185, 80, 0.22);
+}
+
+/* Reset All Data (v22): amber outline — destructive like the kill
+   actions, but deliberately not a third red clone. */
+.btn.reset-all {
+  border-color: #a97b0f;
+  color: #f0b429;
+  background: rgba(240, 180, 41, 0.08);
+}
+
+.btn.reset-all:hover:not(:disabled) {
+  background: rgba(240, 180, 41, 0.18);
+}
+
+/* The typed-RESET gate inside the reset confirmation modal. */
+.reset-type-input {
+  background: #0d1424;
+  color: #e6edf3;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 14px;
+  letter-spacing: 2px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 14px;
+}
+
+.reset-type-input::placeholder {
+  color: #5f7189;
 }
 
 .halt-banner {

@@ -190,6 +190,11 @@ export class EventHistoryStore {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as
         | PersistedHistoryV2
         | PersistedHistoryV1;
+      // Read pre-narrowing: after the v2/v1 branches return, the union
+      // narrows to never and TS 5.9 refuses parsed.version below
+      // (Phase 12 drive-by fix for a latent typecheck error; the
+      // runtime behavior is unchanged).
+      const rawVersion: unknown = parsed.version;
 
       if (parsed.version === 2) {
         if (
@@ -253,9 +258,7 @@ export class EventHistoryStore {
         return report;
       }
 
-      throw new Error(
-        `unsupported version ${String((parsed as { version: unknown }).version)}`,
-      );
+      throw new Error(`unsupported version ${String(rawVersion)}`);
     } catch (err) {
       // A corrupt history file must never wedge the API: start with
       // an empty history and say so loudly (same rule as ModeStore).
@@ -342,8 +345,33 @@ export class EventHistoryStore {
         this.recent.splice(0, this.recent.length - RECENT_CAP);
       }
       this.dirty = true;
+      // The DATA_RESET audit record (v22) is the one recent-class
+      // event that must never sit in the dirty buffer: it is the
+      // record that a wipe happened — the sole survivor of one — so
+      // it persists immediately, exactly like a decision record.
+      if (stored.type === "data_reset") this.flush();
     }
     return stored;
+  }
+
+  /**
+   * Reset All Data (v22): wipe every retained event and restart the
+   * sequence at 1, so the engine's DATA_RESET audit event becomes
+   * seq 1 — the sole first entry of the fresh history. Flushed
+   * immediately: a wipe must be durable the moment it is effected,
+   * never left sitting in the dirty buffer where a crash could
+   * resurrect the wiped record.
+   */
+  reset(): void {
+    this.protectedDecisions = [];
+    this.simDecisions = [];
+    this.recent = [];
+    this.nextSeq = 1;
+    this.dirty = true;
+    this.flush();
+    console.log(
+      "[history] event history wiped by Reset All Data — sequence restarts at 1",
+    );
   }
 
   /** Highest sequence number assigned so far (0 when empty). */

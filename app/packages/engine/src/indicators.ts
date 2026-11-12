@@ -84,6 +84,28 @@ export interface TimedBar {
   high: number;
   low: number;
   close: number;
+  /** Traded volume in the bar, when the feed provides it (Phase 12: crypto bars do; equity bars may omit it). */
+  volume?: number;
+}
+
+/**
+ * Average true range over the last `period` timed bars (simple mean,
+ * same convention as atrMean). Null when fewer than period+1 bars.
+ */
+export function atrTimed(bars: TimedBar[], period: number): number | null {
+  if (bars.length < period + 1 || period <= 0) return null;
+  let sum = 0;
+  for (let i = bars.length - period; i < bars.length; i++) {
+    const bar = bars[i]!;
+    const prevClose = bars[i - 1]!.close;
+    const tr = Math.max(
+      bar.high - bar.low,
+      Math.abs(bar.high - prevClose),
+      Math.abs(bar.low - prevClose),
+    );
+    sum += tr;
+  }
+  return sum / period;
 }
 
 /** Highest high over the `period` bars BEFORE the last one (hourly breakout level). */

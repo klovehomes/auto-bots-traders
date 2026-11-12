@@ -20,15 +20,14 @@ import type {
  * never reach this code). GET /allocations carries the result, and
  * the Bot Trades panel renders exactly what it says.
  *
- * The truths encoded here, as of this build:
+ * The truths encoded here, as of this build (PM8):
  * - sim: the simulator runs every sleeve. Nothing is greyed.
- * - paper: NO sleeve can really trade yet. Polymarket has no paper
- *   or testnet mode at all, so its sleeve is unavailable in paper on
- *   principle. PolyCrypt9000's Alpaca paper runner (crypto sleeve)
- *   and the Kalshi demo runner are NOT built — PolyCrypt runs on the
- *   simulator in paper mode — so those sleeves are unavailable
- *   regardless of configuration; the reason names the FIRST blocker
- *   (missing keys first, then the missing runner).
+ * - paper: PolyCrypt9000's Alpaca paper runner (crypto sleeve) and
+ *   Kalshi demo runner both exist now (PM8 true-paper phase), so a
+ *   sleeve is available exactly when its keys are configured — the
+ *   reason names the missing keys. Polymarket has no paper or
+ *   testnet mode at all, so its sleeve is unavailable in paper on
+ *   principle. The bot allocation is available when any sleeve is.
  * - connected (live cash): live trading is not enabled in this build
  *   at all (guardrail stub; the dashboard switch refuses to store
  *   "connected" and the dropdown lists it as not enabled yet). If a
@@ -65,16 +64,12 @@ export const REASON_POLYMARKET_NO_PAPER =
   "Not available on Polymarket — Polymarket has no paper mode";
 export const REASON_CRYPTO_NO_KEYS =
   "Not set up — no Alpaca paper API keys configured";
-export const REASON_CRYPTO_NO_RUNNER =
-  "Not set up — the Alpaca paper runner isn't built yet";
 export const REASON_KALSHI_NOT_CONNECTED =
   "Not set up — Kalshi demo isn't connected (no API keys configured)";
-export const REASON_KALSHI_NO_RUNNER =
-  "Not set up — the Kalshi demo runner isn't built yet";
 export const REASON_LIVE_NOT_ENABLED = "Live cash mode is not enabled yet";
 export const REASON_PAPER_BOT_BLOCKED =
   "The bot can't trade in Paper trading yet — Polymarket has no paper mode, " +
-  "and the Crypto and Kalshi paper sleeves aren't set up in this build.";
+  "and the Crypto and Kalshi paper sleeves have no keys configured.";
 
 const SLEEVE_ORDER: readonly (keyof SleeveToggles)[] = [
   "crypto",
@@ -110,21 +105,19 @@ export function computeAvailability(
     };
   }
 
-  // paper — first-blocker reasons, per sleeve.
+  // paper — a sleeve is available exactly when its keys are
+  // configured (PM8: both paper runners exist now). Polymarket has
+  // no paper mode on principle.
   const bySleeve: Record<keyof SleeveToggles, SleeveAvailability> = {
     crypto: {
       sleeve: "crypto",
-      available: false,
-      reason: config.alpacaKeysPresent
-        ? REASON_CRYPTO_NO_RUNNER
-        : REASON_CRYPTO_NO_KEYS,
+      available: config.alpacaKeysPresent,
+      reason: config.alpacaKeysPresent ? null : REASON_CRYPTO_NO_KEYS,
     },
     kalshi: {
       sleeve: "kalshi",
-      available: false,
-      reason: config.kalshiCredsPresent
-        ? REASON_KALSHI_NO_RUNNER
-        : REASON_KALSHI_NOT_CONNECTED,
+      available: config.kalshiCredsPresent,
+      reason: config.kalshiCredsPresent ? null : REASON_KALSHI_NOT_CONNECTED,
     },
     polymarket: {
       sleeve: "polymarket",

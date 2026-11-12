@@ -33,7 +33,7 @@ import { dirname } from "node:path";
  * persisted) and broadcast to dashboards over the WebSocket.
  */
 
-export type ControlAction = "kill" | "kill-liquidate" | "resume";
+export type ControlAction = "kill" | "kill-liquidate" | "resume" | "reset";
 export type ControlScope = "bot" | "fleet";
 
 export interface LiquidationClose {
@@ -73,6 +73,9 @@ export interface AuditEntry {
   /** Present on kill-liquidate entries; filled in when the engine's
    *  liquidation report lands. */
   liquidation?: LiquidationReport;
+  /** Present on fleet reset entries (v22); filled in when the engine's
+   *  reset report lands. */
+  reset?: { status: "pending" | "complete" };
 }
 
 export interface BotControl {
@@ -88,18 +91,39 @@ export interface PendingLiquidation {
   requestedAt: string;
 }
 
+/**
+ * One in-flight Reset All Data (v22). Fleet-scope only, at most one at
+ * a time: the reset halts the whole team, and the engine wipes every
+ * bot's book back to its initial allocation, then reports completion.
+ * The unique id makes engine-side application idempotent — a runner
+ * applies a given id at most once, and the engine coordinator emits
+ * the DATA_RESET audit event for an id at most once. Persisted, so a
+ * reset requested while the engine is down (or interrupted by a
+ * restart on either side) still executes to completion on boot.
+ */
+export interface PendingReset {
+  id: string;
+  /** Audit entry this reset belongs to. */
+  auditId: string;
+  requestedAt: string;
+}
+
 export interface ControlPublicState {
   bots: Record<string, BotControl & { pendingLiquidate: boolean }>;
   anyHalted: boolean;
   allHalted: boolean;
   /** Newest-first, capped. */
   audit: AuditEntry[];
+  /** True while a Reset All Data (v22) is still being executed. */
+  pendingReset: boolean;
 }
 
 /** Full state for the engine (internal endpoint only). */
 export interface ControlInternalState {
   bots: Record<string, BotControl>;
   pending: PendingLiquidation[];
+  /** The in-flight Reset All Data, or null (v22). */
+  pendingReset: PendingReset | null;
 }
 
 interface PersistedState {
@@ -107,6 +131,8 @@ interface PersistedState {
   bots: Record<string, BotControl>;
   pending: PendingLiquidation[];
   audit: AuditEntry[];
+  /** v22 addition; absent in state files written before v22. */
+  pendingReset?: PendingReset | null;
 }
 
 const AUDIT_CAP = 200;
@@ -125,6 +151,7 @@ export class ControlStore {
   private readonly codenames: string[];
   private bots: Record<string, BotControl> = {};
   private pending: PendingLiquidation[] = [];
+  private pendingReset: PendingReset | null = null;
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Set<() => void>>();
 
@@ -159,6 +186,11 @@ export class ControlStore {
       }
       this.pending = Array.isArray(parsed.pending) ? parsed.pending : [];
       this.audit = Array.isArray(parsed.audit) ? parsed.audit : [];
+      // Pre-v22 state files have no pendingReset field — tolerate that.
+      this.pendingReset =
+        parsed.pendingReset && typeof parsed.pendingReset.id === "string"
+          ? parsed.pendingReset
+          : null;
     } catch (err) {
       // A corrupt state file must never wedge the fleet: fall back to
       // all-active and say so loudly. (Halts are safety state; the
@@ -176,6 +208,7 @@ export class ControlStore {
       bots: this.bots,
       pending: this.pending,
       audit: this.audit.slice(-AUDIT_CAP),
+      pendingReset: this.pendingReset,
     };
     try {
       mkdirSync(dirname(this.path), { recursive: true });
@@ -206,6 +239,7 @@ export class ControlStore {
       anyHalted: haltedCount > 0,
       allHalted: this.codenames.length > 0 && haltedCount === this.codenames.length,
       audit: [...this.audit].slice(-AUDIT_PUBLIC).reverse(),
+      pendingReset: this.pendingReset !== null,
     };
   }
 
@@ -215,6 +249,7 @@ export class ControlStore {
         Object.entries(this.bots).map(([k, v]) => [k, { ...v }]),
       ),
       pending: this.pending.map((p) => ({ ...p })),
+      pendingReset: this.pendingReset ? { ...this.pendingReset } : null,
     };
   }
 
@@ -246,6 +281,8 @@ export class ControlStore {
     source: string,
   ): AuditEntry | null {
     if (!this.hasBot(codename)) return null;
+    // Reset is fleet-scope only and goes through applyFleetReset().
+    if (action === "reset") return null;
     const now = new Date().toISOString();
 
     if (action === "resume") {
@@ -305,6 +342,8 @@ export class ControlStore {
     action: ControlAction,
     source: string,
   ): AuditEntry | null {
+    // Reset goes through applyFleetReset() — never the generic path.
+    if (action === "reset") return null;
     const now = new Date().toISOString();
 
     if (action === "resume") {
@@ -358,6 +397,96 @@ export class ControlStore {
       source,
       changed,
     });
+  }
+
+  /**
+   * Reset All Data (v22), fleet scope. Halts the whole team (same as a
+   * fleet kill) and records the pending reset the engine executes:
+   * every bot's book back to its initial allocation, state files
+   * reinitialized, then a report back via completeReset(). Any
+   * not-yet-executed liquidation requests are dropped — the wipe
+   * supersedes them (their audit entries keep saying "pending"; the
+   * reset entry is the record of what actually happened). The team
+   * stays HALTED after the reset until a deliberate resume.
+   *
+   * Returns the audit entry, or null when a reset is already pending
+   * (a second reset request while one is in flight is a no-op and is
+   * not audit-logged again).
+   */
+  applyFleetReset(source: string): AuditEntry | null {
+    if (this.pendingReset) return null;
+    const now = new Date().toISOString();
+    const auditId = newId("audit");
+    for (const codename of this.codenames) {
+      this.setHalted(codename, true);
+    }
+    this.pending = [];
+    this.pendingReset = { id: newId("reset"), auditId, requestedAt: now };
+    return this.appendAudit({
+      id: auditId,
+      ts: now,
+      scope: "fleet",
+      target: null,
+      action: "reset",
+      source,
+      changed: [...this.codenames],
+      reset: { status: "pending" },
+    });
+  }
+
+  /**
+   * The engine reports that the pending reset has been fully executed.
+   * Unknown or already-completed ids are a no-op (returns null) — the
+   * report is idempotent, mirroring completeLiquidation().
+   */
+  completeReset(resetId: string): AuditEntry | null {
+    if (!this.pendingReset || this.pendingReset.id !== resetId) return null;
+    const { auditId } = this.pendingReset;
+    this.pendingReset = null;
+    const entry = this.audit.find((e) => e.id === auditId);
+    if (!entry || !entry.reset) {
+      this.save();
+      return null;
+    }
+    entry.reset.status = "complete";
+    this.save();
+    const waiters = this.waiters.get(entry.id);
+    if (waiters) {
+      this.waiters.delete(entry.id);
+      for (const wake of waiters) wake();
+    }
+    return entry;
+  }
+
+  /**
+   * Resolve once the given audit entry's reset completes, or after
+   * `timeoutMs`. Mirrors waitForLiquidation(): lets the reset POST
+   * answer with the completed entry in the common case.
+   */
+  async waitForReset(
+    auditId: string,
+    timeoutMs: number,
+  ): Promise<AuditEntry | null> {
+    const entry = this.audit.find((e) => e.id === auditId);
+    if (!entry) return null;
+    if (!entry.reset || entry.reset.status === "complete") {
+      return entry;
+    }
+    await new Promise<void>((resolve) => {
+      const set = this.waiters.get(auditId) ?? new Set<() => void>();
+      const wake = (): void => {
+        clearTimeout(timer);
+        set.delete(wake);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        set.delete(wake);
+        resolve();
+      }, timeoutMs);
+      set.add(wake);
+      this.waiters.set(auditId, set);
+    });
+    return this.audit.find((e) => e.id === auditId) ?? null;
   }
 
   /**

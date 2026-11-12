@@ -48,8 +48,13 @@ export interface BotConfig {
   raw: Record<string, unknown>;
 }
 
-/** Event types in the engine → frontend stream (see PLAN.md). */
-export type FleetEventType = "open" | "close" | "signal" | "halt";
+/** Event types in the engine → frontend stream (see PLAN.md).
+ *  "data_reset" (Phase 13 / v22) is the engine's audit record of a
+ *  Reset All Data wipe: it is the sole first entry of the fresh event
+ *  history after a reset, carries bot "system" and a null decision_id
+ *  (so it lands in the history store's recent class), and never enters
+ *  any bot's PnL math. */
+export type FleetEventType = "open" | "close" | "signal" | "halt" | "data_reset";
 
 /**
  * Fleet-wide run mode, from the MODE env var. This is the production
@@ -63,6 +68,25 @@ export type FleetEventType = "open" | "close" | "signal" | "halt";
 export type FleetMode = "sim" | "paper" | "connected";
 
 export type OrderSide = "buy" | "sell";
+
+/**
+ * Market "weather" for the day (v24): the landscape's hub dome renders
+ * one of two particle weathers — green sparklies on a breakout day,
+ * a red meteor shower on a downturn day. Computed in the engine from
+ * SPY (see shared/weather.ts for the rule) and delivered to dashboards
+ * through the API (GET /weather + a "weather" WebSocket broadcast).
+ */
+export type WeatherKind = "breakout" | "downturn";
+
+export interface MarketWeather {
+  kind: WeatherKind;
+  /** SPY's day change in percent, e.g. 0.82 for +0.82%, -1.15 for -1.15%. */
+  spyChangePct: number;
+  /** ISO-8601 timestamp of the engine computation that produced this. */
+  asOf: string;
+  /** Where the numbers came from: the Alpaca paper feed or the simulator. */
+  source: "alpaca" | "sim";
+}
 
 /**
  * One event on the fleet event bus (WebSocket `/events`).

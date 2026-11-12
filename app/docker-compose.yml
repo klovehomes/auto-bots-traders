@@ -33,11 +33,11 @@ services:
       # Bot Trades allocation, sleeve toggles, booked user selections —
       # on the same shared volume, following the control-state pattern.
       ALLOCATIONS_STATE_PATH: /data/allocations.json
-      # Phase PM6 (sleeve availability): PRESENCE ONLY. The API never
-      # calls Alpaca or Kalshi — it checks whether these are non-empty
-      # so GET /allocations can grey out Bot Trades sleeves that can't
-      # really trade in the current run mode, with the reason. The
-      # values themselves stay in .env and are never served or logged.
+      # Phase PM6 (sleeve availability), re-pointed in PM8 at the
+      # keys file: GET /allocations greys out Bot Trades sleeves that
+      # can't really trade in the current run mode, with the reason,
+      # based on GET /keys/status. The env vars below remain as the
+      # pre-keys-file fallback; values are never served or logged.
       ALPACA_API_KEY: ${ALPACA_API_KEY:-}
       ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
       KALSHI_API_KEY_ID: ${KALSHI_API_KEY_ID:-}
@@ -55,10 +55,20 @@ services:
       GATE_COOKIE_SECURE: ${GATE_COOKIE_SECURE:-false}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       MAIL_FROM: ${MAIL_FROM:-}
+      # v24 (market weather): the engine's SPY verdict persists on the
+      # same volume so an API restart keeps the dome's sky until the
+      # next hourly report.
+      WEATHER_STATE_PATH: /data/weather-state.json
+      # Phase 12 (v21): the API reads the same keys file as the engine
+      # so GET /keys/status can report presence. The file itself is
+      # mounted below (read-only); the default source is /dev/null —
+      # an empty mount — until TRADERBOT_KEYS_FILE is set in .env.
+      KEYS_FILE: /keys/traderbot-keys.txt
     volumes:
       # Bot definitions live outside the app image; mounted read-only.
       - ../bots:/bots:ro
       - fleet-data:/data
+      - ${TRADERBOT_KEYS_FILE:-/dev/null}:/keys/traderbot-keys.txt:ro
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -75,14 +85,42 @@ services:
       ALPACA_API_KEY: ${ALPACA_API_KEY:-}
       ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
       ALPACA_PAPER: ${ALPACA_PAPER:-true}
+      # Phase 1 paper-trader state (Trendia's peaks, entries, pending
+      # orders, realized PnL) persists on the shared data volume so a
+      # restart reconciles instead of forgetting open positions.
+      PAPER_STATE_PATH: /data/paper-trendia-state.json
+      # Phase 3 (Vega): SHADOW mode is the delivered default — his full
+      # options pipeline runs and logs decision/order-intent events but
+      # places NO broker orders. Set VEGA_SHADOW=false in .env to flip
+      # him to live paper orders (Keith's word only).
+      VEGA_SHADOW: ${VEGA_SHADOW:-true}
+      # Vega's state (tracked contracts, realized PnL, earnings map,
+      # IV history) persists on the same shared data volume.
+      VEGA_STATE_PATH: /data/paper-vega-state.json
+      # Phase 4 (Snapback): her state (tracked positions, pending
+      # orders, realized PnL) persists on the same shared data volume.
+      SNAPBACK_STATE_PATH: /data/paper-snapback-state.json
+      # Phase 12 (v21): paper keys come from the local keys file
+      # (mounted read-only below from TRADERBOT_KEYS_FILE in .env;
+      # /dev/null = empty file until that's set). File beats env.
+      KEYS_FILE: /keys/traderbot-keys.txt
+      # Phase 12: Wesley's wheel state and PolyCrypt9000's sleeve
+      # state persist on the shared data volume like the others.
+      WESLEY_STATE_PATH: /data/paper-wesley-state.json
+      POLYCRYPT_STATE_PATH: /data/paper-polycrypt-state.json
       # Phase 5: the stored dashboard mode choice (written by the API,
       # see MODE_STATE_PATH on the api service). Read at boot; when the
       # dashboard flips the switch, this engine exits and the restart
       # policy below relaunches it into the stored mode.
       MODE_STATE_PATH: /data/mode-state.json
+      # v22: the Reset All Data coordinator's progress marker lives on
+      # the same durable volume, so a mid-reset engine restart resumes
+      # the wipe instead of double-applying it.
+      RESET_PROGRESS_PATH: /data/reset-progress.json
     volumes:
       - ../bots:/bots:ro
       - fleet-data:/data
+      - ${TRADERBOT_KEYS_FILE:-/dev/null}:/keys/traderbot-keys.txt:ro
     depends_on:
       - api
     restart: unless-stopped
@@ -96,6 +134,10 @@ services:
         # it into the static bundle at build time, so changing API_URL
         # requires `docker compose up -d --build`, not a restart.
         VITE_API_URL: ${API_URL:-}
+        # Optional display override for the build version shown under
+        # the "Prediction Markets Assistant" header (BUILD_VERSION in .env).
+        # Blank keeps the checked-in default in web/src/version.ts.
+        VITE_BUILD_VERSION: ${BUILD_VERSION:-}
     ports:
       - "4173:4173"
     depends_on:

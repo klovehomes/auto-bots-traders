@@ -5,7 +5,9 @@ import { WebSocket } from "ws";
 import {
   fleetEventSchema,
   fleetModeSchema,
+  getPaperKeys,
   loadBots,
+  marketWeatherSchema,
   parseFleetMode,
   resolveBotsDir,
 } from "@fleet/shared";
@@ -17,6 +19,7 @@ import {
   type LiquidationFailure,
 } from "./control.js";
 import { ModeStore } from "./mode.js";
+import { WeatherStore } from "./weather.js";
 import { EventHistoryStore } from "./history.js";
 import { ScanService } from "./gamma.js";
 import { AllocationStore } from "./allocations.js";
@@ -122,38 +125,54 @@ const GATE_MAIL = {
   mailFrom: process.env.MAIL_FROM ?? "",
 };
 /**
- * Phase PM6 — broker configuration PRESENCE, booleans only. The API
- * never calls Alpaca or Kalshi; it checks whether credentials are
- * set (values are never read beyond non-emptiness, never logged,
- * never served) so GET /allocations can label Bot Trades sleeve
- * availability truthfully for the current run mode. Docker passes
- * the .env values through to this service for exactly this check
- * (see docker-compose.yml).
+ * Phase PM6 — broker configuration PRESENCE, booleans only. PM8
+ * re-pointed this at the v21 keys-file loader: presence now means
+ * the shared loader resolved the credentials (keys file first,
+ * .env/environment fallback — see keys.ts), so a Kalshi demo key in
+ * ~/traderbot-keys.txt counts as connected. The env-var check
+ * survives only as the fallback for setups that predate the keys
+ * file. Values are never read beyond non-emptiness, never logged,
+ * never served — GET /allocations uses the booleans to label Bot
+ * Trades sleeve availability truthfully for the current run mode.
  *
- * Kalshi credential names: the true-paper phase has not defined any
- * yet — no Kalshi runner exists in this build — so these are the
- * names that phase will use, checked now so the availability label
- * flips from "isn't connected" to "runner isn't built" the day the
- * credentials land. Kalshi's API authenticates with a key ID plus an
- * RSA private key (PEM contents or a path to the key file).
+ * Kalshi's API authenticates with a key ID plus an RSA private key
+ * (inline PEM in the keys file, or KALSHI_PRIVATE_KEY_PATH to a
+ * .pem file). The Kalshi runner exists now (PM8 true-paper phase),
+ * so the availability label no longer has a "runner isn't built"
+ * state — it is "isn't connected" until the keys resolve.
  */
 function envConfigured(value: string | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
+const KEYS_STATUS = getPaperKeys().status;
 const ALPACA_KEYS_PRESENT =
-  envConfigured(process.env.ALPACA_API_KEY) &&
-  envConfigured(process.env.ALPACA_API_SECRET);
+  KEYS_STATUS.alpaca.loaded ||
+  (envConfigured(process.env.ALPACA_API_KEY) &&
+    envConfigured(process.env.ALPACA_API_SECRET));
 const KALSHI_CREDS_PRESENT =
-  envConfigured(process.env.KALSHI_API_KEY_ID) &&
-  (envConfigured(process.env.KALSHI_PRIVATE_KEY) ||
-    envConfigured(process.env.KALSHI_PRIVATE_KEY_PATH) ||
-    envConfigured(process.env.KALSHI_API_KEY));
+  KEYS_STATUS.kalshi.loaded ||
+  (envConfigured(process.env.KALSHI_API_KEY_ID) &&
+    (envConfigured(process.env.KALSHI_PRIVATE_KEY) ||
+      envConfigured(process.env.KALSHI_PRIVATE_KEY_PATH) ||
+      envConfigured(process.env.KALSHI_API_KEY)));
 /** PolyCrypt9000's starting book (matches fleetState START_EQUITY). */
 const START_EQUITY = 10000;
+/**
+ * Where the market weather (v24) persists. Same durability pattern as
+ * the other fleet state — in Docker it lives on the shared fleet-data
+ * volume so an API restart keeps the dome's weather until the
+ * engine's next hourly report lands.
+ */
+const WEATHER_STATE_PATH =
+  process.env.WEATHER_STATE_PATH ?? "./data/weather-state.json";
 /** How long a kill-liquidate POST waits for the engine's report before
  *  answering with a still-pending report (the report completes over the
  *  WebSocket when it lands). The sim engine polls every 1 s. */
 const LIQUIDATION_WAIT_MS = 10_000;
+/** Same contract for a Reset All Data POST (v22): paper runners apply
+ *  on their next ≤30 s tick, so a still-pending answer is normal there;
+ *  sim applies within about a second. */
+const RESET_WAIT_MS = 10_000;
 
 async function main(): Promise<void> {
   const app = Fastify({ logger: true });
@@ -189,6 +208,18 @@ async function main(): Promise<void> {
   const modeStore = new ModeStore(MODE_STATE_PATH, MODE);
   app.log.info(
     `mode state: ${MODE_STATE_PATH} (desired: ${modeStore.desiredMode()})`,
+  );
+
+  // Market weather (v24): computed by the engine from SPY, reported
+  // over the internal channel, served + broadcast from here so every
+  // dashboard — including a freshly loaded one — shows the same sky.
+  const weatherStore = new WeatherStore(WEATHER_STATE_PATH);
+  app.log.info(
+    `weather state: ${WEATHER_STATE_PATH} (current: ${
+      weatherStore.current()
+        ? `${weatherStore.current()!.kind} ${weatherStore.current()!.spyChangePct}%`
+        : "none reported yet"
+    })`,
   );
 
   // Event history (Phase 6): the stream's durable memory. Ingested
@@ -356,6 +387,15 @@ async function main(): Promise<void> {
     });
   }
 
+  /** Fan a weather change out to every open dashboard (v24). */
+  function broadcastWeather(): void {
+    broadcast({
+      kind: "weather",
+      ts: new Date().toISOString(),
+      state: weatherStore.current(),
+    });
+  }
+
   // --- Phase PM7: email gate endpoints --------------------------------
   // Public by design (they ARE the gate) — exempt from the session
   // guard above. Response shapes mirror the v17 showcase gate.
@@ -421,6 +461,36 @@ async function main(): Promise<void> {
   app.get("/health", async () => ({ ok: true, mode: MODE }));
 
   app.get("/bots", async () => bots);
+
+  // Paper-keys status (Phase 12, v21): PRESENCE ONLY. The shared
+  // loader's status surface is the whole answer — per-provider loaded
+  // flag, where the key id came from, and the key id's last 4 chars.
+  // Secret values and the Kalshi PEM never leave the loader; there is
+  // deliberately no route that returns them.
+  app.get("/keys/status", async () => getPaperKeys().status);
+
+  // Market weather (v24): the engine's latest SPY verdict. Dashboards
+  // fetch this on load (before the live socket) and then track the
+  // "weather" WebSocket broadcasts. Null until the engine's first
+  // report — the web falls back to a calm default sky meanwhile.
+  app.get("/weather", async () => weatherStore.current());
+
+  // The engine reports freshly computed weather here (internal token,
+  // same trust as the mode report). Validation is the shared schema;
+  // a malformed report is a 400 and changes nothing.
+  app.post("/internal/weather", async (request, reply) => {
+    if (request.headers["x-internal-token"] !== INTERNAL_EVENT_TOKEN) {
+      return reply.code(401).send({ error: "invalid internal token" });
+    }
+    const parsed = marketWeatherSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid weather", details: parsed.error.issues });
+    }
+    if (weatherStore.update(parsed.data)) broadcastWeather();
+    return { ok: true };
+  });
 
   // --- Kill switch / Risk Gate control ---------------------------------
   // These endpoints are the control surface of the fleet. In deployment
@@ -491,6 +561,54 @@ async function main(): Promise<void> {
     };
   }
 
+  /**
+   * Reset All Data (v22). Distinct from runAction() because the wipe
+   * has an API-side half: the moment the reset is accepted, the event
+   * history store is cleared (and its sequence restarted) here, while
+   * the engine wipes the bot books and reports completion. PolyCrypt9000
+   * is halted by applyFleetReset() and STAYS halted — resuming is a
+   * separate deliberate action, exactly like after a kill.
+   */
+  async function runReset() {
+    const entry = control.applyFleetReset("web-ui");
+    if (entry) {
+      historyStore.reset();
+      // PM8: Reset All Data is a true clean slate — the shared-pool
+      // ledger (bot allocation, sleeve toggles, booked user
+      // selections) is wiped with the books, so nothing booked
+      // survives against the fresh $10,000 book.
+      allocationStore.reset();
+      broadcastControl(entry);
+      const done = await control.waitForReset(entry.id, RESET_WAIT_MS);
+      if (done?.reset?.status === "complete") {
+        broadcastControl(done);
+        return {
+          ok: true,
+          changed: done.changed,
+          entry: done,
+          reset: done.reset,
+          state: control.publicState(),
+        };
+      }
+      return {
+        ok: true,
+        changed: entry.changed,
+        entry,
+        reset: entry.reset,
+        resetNote:
+          "reset accepted and PolyCrypt9000 is halted; the engine is wiping the book and completion arrives over the WebSocket",
+        state: control.publicState(),
+      };
+    }
+    return {
+      ok: true,
+      changed: [] as string[],
+      noop: true,
+      entry: null,
+      state: control.publicState(),
+    };
+  }
+
   const BOT_ACTIONS: Record<string, ControlAction> = {
     kill: "kill",
     "kill-liquidate": "kill-liquidate",
@@ -515,6 +633,9 @@ async function main(): Promise<void> {
   app.post<{ Params: { action: string } }>(
     "/control/fleet/:action",
     async (request, reply) => {
+      // Reset is fleet-only and has its own handler (see runReset);
+      // the bot-scoped route below 404s it like any unknown action.
+      if (request.params.action === "reset") return runReset();
       const mapped = BOT_ACTIONS[request.params.action];
       if (!mapped) return reply.code(404).send({ error: "unknown action" });
       return runAction(() => control.applyFleetAction(mapped, "web-ui"));
@@ -574,6 +695,27 @@ async function main(): Promise<void> {
     );
     if (!entry) {
       return reply.code(404).send({ error: "unknown or already-reported liquidation" });
+    }
+    broadcastControl(entry);
+    return { ok: true };
+  });
+
+  // The engine reports that a Reset All Data (v22) has been fully
+  // executed — every book wiped, state files reinitialized, and the
+  // DATA_RESET audit event posted. Same internal-token trust pattern
+  // as the liquidation report; unknown ids 404 (idempotent retries
+  // after a successful report get the same 404 and stop).
+  app.post("/internal/control/reset-report", async (request, reply) => {
+    if (request.headers["x-internal-token"] !== INTERNAL_EVENT_TOKEN) {
+      return reply.code(401).send({ error: "invalid internal token" });
+    }
+    const body = request.body as { id?: string } | null;
+    if (!body?.id) {
+      return reply.code(400).send({ error: "missing reset id" });
+    }
+    const entry = control.completeReset(body.id);
+    if (!entry) {
+      return reply.code(404).send({ error: "unknown or already-reported reset" });
     }
     broadcastControl(entry);
     return { ok: true };

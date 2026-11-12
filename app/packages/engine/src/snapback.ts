@@ -358,6 +358,8 @@ export function startSnapbackTrader(
 
   let haltCancelHandled = false;
   let booted = false;
+  /** The last Reset All Data id this runner applied (v22 idempotency). */
+  let lastResetId: string | null = null;
   let tickBusy = false;
 
   // The bar-derived parts of the stretch (mean, SD, 200DMA, closes)
@@ -1022,6 +1024,27 @@ export function startSnapbackTrader(
     if (tickBusy) return;
     tickBusy = true;
     try {
+      // Reset All Data (v22): checked first, before liquidations and
+      // polls, so nothing from the old book can act or report into
+      // the fresh history. Idempotent per reset id. Broker caveat:
+      // this wipes the APP book only — positions open at the broker
+      // are NOT closed; they become untracked ("foreign") and the
+      // state-only reconcile ignores them from here on.
+      const pendingReset = control.pendingReset?.();
+      if (pendingReset && pendingReset.id !== lastResetId) {
+        lastResetId = pendingReset.id;
+        await cancelTrackedOrders().catch(() => {});
+        state = freshState();
+        haltCancelHandled = false;
+        booted = false;
+        save();
+        control.noteResetApplied?.(pendingReset.id, bot.codename);
+        console.log(
+          `[snapback] ${bot.name}: DATA RESET applied — book wiped back to the $${STARTING_CAPITAL} start; app positions erased (broker-side positions untouched, now untracked)`,
+        );
+        return;
+      }
+
       await handleLiquidations();
       await pollPending();
 

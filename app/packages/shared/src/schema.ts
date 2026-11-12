@@ -42,9 +42,17 @@ export function parseFleetMode(value: string | undefined): FleetMode {
   return parsed.success ? parsed.data : "sim";
 }
 
+/** Market weather report (v24): engine → API POST /internal/weather. */
+export const marketWeatherSchema = z.object({
+  kind: z.enum(["breakout", "downturn"]),
+  spyChangePct: z.number().finite(),
+  asOf: z.string().min(1),
+  source: z.enum(["alpaca", "sim"]),
+});
+
 export const fleetEventSchema = z.object({
   bot: z.string().min(1),
-  type: z.enum(["open", "close", "signal", "halt"]),
+  type: z.enum(["open", "close", "signal", "halt", "data_reset"]),
   decision_id: z.string().nullable(),
   symbol: z.string().nullable(),
   side: z.enum(["buy", "sell"]).nullable(),

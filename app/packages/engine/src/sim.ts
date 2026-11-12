@@ -3,29 +3,32 @@ import type { BotConfig, FleetEvent } from "@fleet/shared";
 /**
  * SIM MODE — synthetic market + activity generator for local testing.
  *
- * Activated when the MODE is "sim" (MODE=sim, the default; see
+ * Activated when the fleet MODE is "sim" (MODE=sim, the default; see
  * engine/src/index.ts). Lets Keith run the
- * whole stack on his laptop (WSL + Docker) and watch the bot "trade"
+ * whole stack on his laptop (WSL + Docker) and watch the fleet "trade"
  * with fake data: no broker, no API keys, no real market data.
  *
  * How it works:
  * - A seeded RNG (mulberry32, fixed seed) drives a random walk per symbol,
  *   so runs are reproducible.
- * - The bot keeps a small in-memory position book and starts with $10,000
+ * - Each bot keeps a small in-memory position book and starts with $10,000
  *   of sim equity (the decided paper allocation — $5,000 originally,
- *   doubled by Keith on 2026-11-03).
+ *   doubled fleet-wide by Keith on 2026-11-03).
  * - Every ~4–8s (staggered per bot) one bot opens or closes a position and
  *   the event goes through the exact same /internal/events pipeline and
  *   FleetEvent schema as real trading will.
- * - Sizing uses the bot's real `risk.max_position_pct` when the .md
- *   file carries a plain number. PolyCrypt9000's file carries prose
- *   instead ("3 (per Polymarket position) / 15 (per crypto position)"),
- *   so we fall back to FALLBACK_MAX_POSITION_PCT — parsing prose caps
- *   is a strategy plugin job, not the simulator's.
+ * - Sizing uses each bot's real `risk.max_position_pct` when the .md file
+ *   carries a plain number (Trendia 20, Snapback 20, Vega 6 is prose —
+ *   see below). Where the file carries prose instead of a number
+ *   (Vega: "6 (premium paid per options position)", Wesley: "100 (one
+ *   position may use the whole account…)", PolyCrypt9000: "3 (per
+ *   Polymarket position) / 15 (per crypto position)"), we fall back to
+ *   FALLBACK_MAX_POSITION_PCT — parsing prose caps is a Phase 1+ strategy
+ *   plugin job, not the simulator's.
  *
- * The activity generator is a stand-in written in PolyCrypt9000's voice
- * (trigger text mirrors its .md rules); its real/shadow runners are not
- * built yet. Prices and fills are synthetic — see LOCAL-RUN.md.
+ * The activity generators are stand-ins written in each bot's voice
+ * (trigger text mirrors its .md rules); the real strategies arrive in
+ * Phase 1+. Prices and fills are synthetic — see LOCAL-RUN.md.
  *
  * Kill switch: the simulator consults the Risk Gate control state (see
  * engine/src/control.ts) before every action — a halted bot is skipped
@@ -60,6 +63,24 @@ interface PriceSeries {
 
 /** Plausible starting prices for the synthetic book (they are fake data). */
 const START_PRICES: Record<string, { price: number; kind: PriceKind }> = {
+  SPY: { price: 685, kind: "equity" }, QQQ: { price: 610, kind: "equity" },
+  IWM: { price: 245, kind: "equity" }, AAPL: { price: 272, kind: "equity" },
+  MSFT: { price: 505, kind: "equity" }, NVDA: { price: 182, kind: "equity" },
+  AMZN: { price: 232, kind: "equity" }, META: { price: 585, kind: "equity" },
+  GOOGL: { price: 192, kind: "equity" }, AVGO: { price: 352, kind: "equity" },
+  COST: { price: 915, kind: "equity" }, NFLX: { price: 1180, kind: "equity" },
+  TSLA: { price: 345, kind: "equity" },
+  AMD: { price: 215, kind: "volatile" }, PLTR: { price: 168, kind: "volatile" },
+  SMCI: { price: 46, kind: "volatile" }, COIN: { price: 262, kind: "volatile" },
+  HOOD: { price: 118, kind: "volatile" }, MARA: { price: 14.5, kind: "volatile" },
+  SOFI: { price: 26, kind: "volatile" }, RIVN: { price: 13.5, kind: "volatile" },
+  AFRM: { price: 68, kind: "volatile" }, IONQ: { price: 44, kind: "volatile" },
+  SOXL: { price: 46, kind: "volatile" }, TQQQ: { price: 58, kind: "volatile" },
+  UVXY: { price: 17, kind: "volatile" },
+  F: { price: 11.8, kind: "equity" }, INTC: { price: 38, kind: "equity" },
+  BAC: { price: 47, kind: "equity" }, PFE: { price: 25.5, kind: "equity" },
+  T: { price: 24.5, kind: "equity" }, VZ: { price: 40, kind: "equity" },
+  NU: { price: 15.5, kind: "equity" }, WBD: { price: 10.5, kind: "equity" },
   BTC: { price: 97400, kind: "crypto" }, ETH: { price: 3380, kind: "crypto" },
   SOL: { price: 208, kind: "crypto" },
   "PM:FED": { price: 0.61, kind: "prob" },
@@ -89,6 +110,13 @@ type PositionKind = "stock" | "crypto" | "prob" | "optionLong" | "shortPremium";
 export interface SimControl {
   isHalted: (codename: string) => boolean;
   drainLiquidations: () => { id: string; codename: string }[];
+  /**
+   * Reset All Data (v22). Optional so control doubles written before
+   * v22 still satisfy the interface; production wiring (the engine's
+   * ControlClient, directly or via the control router) provides both.
+   */
+  pendingReset?: () => { id: string } | null;
+  noteResetApplied?: (id: string, codename: string) => void;
   reportLiquidation: (
     id: string,
     codename: string,
@@ -135,14 +163,31 @@ function numericOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v): v is string => typeof v === "string");
+}
+
+/**
+ * Market probe (v24): the simulator fills this with a getter for its
+ * live SPY price so the engine's weather service can judge the sim
+ * day (breakout vs downturn) from the same series the bots trade on.
+ */
+export interface SimSpyProbe {
+  current: (() => number) | null;
+}
+
 export function startSimulator(
   bots: BotConfig[],
   post: (event: FleetEvent) => Promise<void>,
   control?: SimControl,
+  spyProbe?: SimSpyProbe,
 ): void {
   const rng = mulberry32(0x5eed);
   const prices = new Map<string, PriceSeries>();
   let decisionCounter = 0;
+  /** The last Reset All Data id the simulator applied (v22). */
+  let lastResetId: string | null = null;
 
   const series = (key: string): PriceSeries => {
     let s = prices.get(key);
@@ -155,6 +200,9 @@ export function startSimulator(
   };
   // Pre-warm the whole book so walks run before the first trade.
   for (const key of Object.keys(START_PRICES)) series(key);
+
+  // Market weather probe (v24): expose the live SPY walk.
+  if (spyProbe) spyProbe.current = () => series("SPY").price;
 
   const stepPrices = (): void => {
     for (const s of prices.values()) {
@@ -202,6 +250,84 @@ export function startSimulator(
 
   // --- Open-position generators, one per bot style -----------------------
 
+  const openStock = (state: BotSim): void => {
+    const universe = stringList(state.bot.universe);
+    if (universe.length === 0) return;
+    const symbol = universe[Math.floor(rng() * universe.length)]!;
+    const price = series(symbol).price;
+    const qty = Math.max(1, Math.floor(budget(state) / price));
+    const reason =
+      state.bot.codename === "trendia"
+        ? `20-day high breakout; RSI(14) ${55 + Math.floor(rng() * 25)}; above 200DMA`
+        : `z-score -${(2 + rng() * 1.2).toFixed(1)} vs 20-day mean; RSI(2) ${3 + Math.floor(rng() * 6)}; above 200DMA`;
+    state.positions.push({
+      label: symbol, priceKey: symbol, kind: "stock", side: "buy",
+      qty, entryPrice: price, displayEntryPrice: price, pnlPerDollar: qty, optionSign: 1,
+    });
+    emit(state, {
+      type: "open", symbol, side: "buy", qty, price: round2(price), pnl: null,
+      reason: `SIM · ${reason}`,
+    });
+  };
+
+  const openVega = (state: BotSim): void => {
+    const list = state.bot.watchlist_examples ?? [];
+    if (list.length === 0) return;
+    const underlying = list[Math.floor(rng() * list.length)]!;
+    const spot = series(underlying).price;
+    const isCall = rng() < 0.6;
+    const strike = Math.max(1, Math.round(spot * (0.97 + rng() * 0.06)));
+    const expiry = ["Nov 7", "Nov 14", "Nov 21"][Math.floor(rng() * 3)]!;
+    const label = `${underlying} ${strike}${isCall ? "C" : "P"} ${expiry}`;
+    const premium = round2(spot * (0.04 + rng() * 0.04));
+    const contracts = Math.max(1, Math.round(budget(state) / (premium * 100)));
+    state.positions.push({
+      label, priceKey: underlying, kind: "optionLong", side: "buy",
+      qty: contracts, entryPrice: spot, displayEntryPrice: premium,
+      pnlPerDollar: contracts * 100 * 0.45 * (isCall ? 1 : -1),
+      optionSign: isCall ? 1 : -1,
+    });
+    emit(state, {
+      type: "open", symbol: label, side: "buy", qty: contracts, price: premium, pnl: null,
+      reason:
+        `SIM · breakout + IV percentile ${70 + Math.floor(rng() * 28)}; ` +
+        `delta 0.${35 + Math.floor(rng() * 20)}; long ${isCall ? "calls" : "puts"}`,
+    });
+  };
+
+  const openWesley = (state: BotSim): void => {
+    const list = state.bot.watchlist_examples ?? [];
+    if (list.length === 0) return;
+    const underlying = list[Math.floor(rng() * list.length)]!;
+    const spot = series(underlying).price;
+    const isPut = rng() < 0.55;
+    const dte = [7, 14, 30][Math.floor(rng() * 3)]!;
+    const expiry = dte === 7 ? "Nov 7" : dte === 14 ? "Nov 14" : "Nov 21";
+    const strike = isPut
+      ? Math.max(1, Math.floor(spot * (0.9 + rng() * 0.05)))
+      : Math.max(1, Math.ceil(spot * (1.05 + rng() * 0.05)));
+    const premium = round2(strike * (0.01 + rng() * 0.008));
+    // The wheel trades in 100-share blocks; at $10k sim equity that is one
+    // contract for most strikes in Wesley's $5–$55 band.
+    const contracts = Math.max(1, Math.floor(budget(state) / (strike * 100)));
+    const label = `${underlying} ${strike}${isPut ? "P" : "C"} ${expiry} (${isPut ? "CSP" : "CC"})`;
+    state.positions.push({
+      label, priceKey: underlying, kind: "shortPremium", side: "sell",
+      qty: contracts, entryPrice: spot, displayEntryPrice: premium,
+      // Short put gains as the underlying rises (delta ~0.25); the covered
+      // call leg loses a little as it rallies (shares themselves aren't
+      // modeled in the sim book).
+      pnlPerDollar: contracts * 100 * (isPut ? 0.25 : -0.2),
+      optionSign: 1,
+    });
+    emit(state, {
+      type: "open", symbol: label, side: "sell", qty: contracts, price: premium, pnl: null,
+      reason:
+        `SIM · ${isPut ? "CSP" : "CC"} ${dte} DTE, delta 0.${20 + Math.floor(rng() * 10)}, ` +
+        `premium ${((premium / strike) * 100).toFixed(1)}% of strike`,
+    });
+  };
+
   const openPolyCrypt = (state: BotSim): void => {
     state.polyToggle = !state.polyToggle;
     if (state.polyToggle) {
@@ -241,19 +367,44 @@ export function startSimulator(
   };
 
   const openPosition = (state: BotSim): void => {
-    return openPolyCrypt(state);
+    switch (state.bot.codename) {
+      case "vega": return openVega(state);
+      case "wesley": return openWesley(state);
+      case "polycrypt9000": return openPolyCrypt(state);
+      default: return openStock(state); // trendia, snapback
+    }
   };
 
   // --- Closing ------------------------------------------------------------
 
   const closeReason = (state: BotSim, pos: SimPosition, pnl: number): string => {
     const win = pnl >= 0;
-    if (state.bot.codename === "polycrypt9000" && pos.kind !== "prob") {
-      return "exit: 2x ATR trailing stop";
+    switch (state.bot.codename) {
+      case "trendia":
+        return win
+          ? "exit: momentum cooled — RSI(14) overbought, profit locked"
+          : "exit: 8% trailing stop hit / close below 50DMA";
+      case "snapback":
+        return win
+          ? "exit: price returned to the 20-day mean"
+          : "exit: 5% stop hit / 5-day time stop";
+      case "vega":
+        return win
+          ? "exit: +50% premium target hit"
+          : "exit: -35% premium stop / 5-day time stop";
+      case "wesley":
+        return win
+          ? "exit: bought back at ~50% of premium — redeploy"
+          : "exit: defended at 2x premium — rolled out";
+      case "polycrypt9000":
+        return pos.kind === "prob"
+          ? win
+            ? "exit: market converged to model — edge captured"
+            : "exit: model edge invalidated — cut"
+          : "exit: 2x ATR trailing stop";
+      default:
+        return win ? "exit: target reached" : "exit: stop hit";
     }
-    return win
-      ? "exit: market converged to model — edge captured"
-      : "exit: model edge invalidated — cut";
   };
 
   /**
@@ -359,6 +510,30 @@ export function startSimulator(
     // The engine owns the position book, so it performs the forced
     // closes itself and reports the results back to the API.
     if (control) {
+      // Reset All Data (v22) outranks liquidations: wipe every sim
+      // book back to the start equity, erase positions, and restart
+      // the decision counter (sim decision ids are the sim books' own
+      // numbering — a blank history restarts them too). Idempotent
+      // per reset id. The team stays halted afterwards (the API owns
+      // the halt); a deliberate resume restarts trading from here.
+      const pendingReset = control.pendingReset?.();
+      if (pendingReset && pendingReset.id !== lastResetId) {
+        lastResetId = pendingReset.id;
+        for (const s of states) {
+          s.equity = SIM_START_EQUITY;
+          s.positions = [];
+          s.polyToggle = false;
+          s.nextActionAt = now + 1000;
+        }
+        decisionCounter = 0;
+        for (const s of states) {
+          control.noteResetApplied?.(pendingReset.id, s.bot.codename);
+        }
+        console.log(
+          `[sim] DATA RESET applied — all sim books wiped back to $${SIM_START_EQUITY}, positions erased`,
+        );
+      }
+
       for (const req of control.drainLiquidations()) {
         const state = states.find((s) => s.bot.codename === req.codename);
         if (!state) {
