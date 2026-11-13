@@ -1023,10 +1023,53 @@ body {
   .event {
     font-size: 13px;
     flex-wrap: wrap;
+    align-items: flex-start;
   }
 
+  /* Mobile feed rows: the reason/trade text gets its own full-width
+     line. Before this, the text shared one flex line with the
+     decision id and the nowrap timestamp ("Nov 11, 9:52 PM"), which
+     squeezed it to ~100px on a phone — and flex-basis 0% meant it
+     could always shrink instead of wrapping. Basis 100% forces the
+     wrap; the id (left) and time (right, margin-left auto) form a
+     meta line above the text. align-items: flex-start keeps them
+     pinned to the top instead of vertically centered mid-row. */
+  .event-main {
+    flex: 1 1 100%;
+    order: 2;
+  }
+
+  /* Meta items (id / avatar / time / pnl / info) stay on the first
+     line; order puts them there even though the text comes before
+     them in the DOM for trades rows. */
+  .event-ts {
+    margin-left: auto;
+    order: 1;
+  }
+
+  .info-btn {
+    margin-left: auto;
+    order: 1;
+  }
+
+  .feed-search {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .feed-filter-group {
+    flex: 1;
+  }
+
+  /* Decision modal: stack label above value so the long reason text
+     is full-width instead of sharing a 104px-label grid column. */
   .decision-grid {
-    grid-template-columns: 104px 1fr;
+    grid-template-columns: 1fr;
+    gap: 2px 0;
+  }
+
+  .decision-grid dd {
+    margin-bottom: 10px;
   }
 }
 
