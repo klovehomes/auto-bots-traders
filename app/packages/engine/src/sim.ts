@@ -77,8 +77,11 @@ const START_PRICES: Record<string, { price: number; kind: PriceKind }> = {
   AFRM: { price: 68, kind: "volatile" }, IONQ: { price: 44, kind: "volatile" },
   SOXL: { price: 46, kind: "volatile" }, TQQQ: { price: 58, kind: "volatile" },
   UVXY: { price: 17, kind: "volatile" },
+  NVDL: { price: 18, kind: "volatile" }, CAVA: { price: 58, kind: "volatile" },
   F: { price: 11.8, kind: "equity" }, INTC: { price: 38, kind: "equity" },
   BAC: { price: 47, kind: "equity" }, PFE: { price: 25.5, kind: "equity" },
+  JPM: { price: 290, kind: "equity" }, LOW: { price: 230, kind: "equity" },
+  CAT: { price: 600, kind: "equity" },
   T: { price: 24.5, kind: "equity" }, VZ: { price: 40, kind: "equity" },
   NU: { price: 15.5, kind: "equity" }, WBD: { price: 10.5, kind: "equity" },
   BTC: { price: 97400, kind: "crypto" }, ETH: { price: 3380, kind: "crypto" },
@@ -271,7 +274,7 @@ export function startSimulator(
   };
 
   const openVega = (state: BotSim): void => {
-    const list = state.bot.watchlist_examples ?? [];
+    const list = state.bot.candidate_pool ?? state.bot.watchlist_examples ?? [];
     if (list.length === 0) return;
     const underlying = list[Math.floor(rng() * list.length)]!;
     const spot = series(underlying).price;
@@ -296,7 +299,7 @@ export function startSimulator(
   };
 
   const openWesley = (state: BotSim): void => {
-    const list = state.bot.watchlist_examples ?? [];
+    const list = state.bot.candidate_pool ?? state.bot.watchlist_examples ?? [];
     if (list.length === 0) return;
     const underlying = list[Math.floor(rng() * list.length)]!;
     const spot = series(underlying).price;

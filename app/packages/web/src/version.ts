@@ -14,4 +14,4 @@ const override = import.meta.env.VITE_BUILD_VERSION as string | undefined;
 export const BUILD_VERSION: string =
   typeof override === "string" && override.trim() !== ""
     ? override.trim()
-    : "v25";
+    : "v26";

@@ -259,7 +259,7 @@ export function startWesleyTrader(
 ): void {
   const now = deps.now ?? (() => new Date());
   const params: WesleyParams = {
-    universe: (bot.watchlist_examples ?? []).filter(
+    universe: (bot.candidate_pool ?? bot.watchlist_examples ?? []).filter(
       (v): v is string => typeof v === "string",
     ),
     priceMin: leadingNumber(bot.rules.underlying_price_min, 5),

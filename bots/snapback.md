@@ -6,7 +6,7 @@ mode: paper
 market: us_stocks
 broker: alpaca
 strategy: mean_reversion
-universe: [SPY, QQQ, IWM, AAPL, MSFT, AMD, NFLX, TSLA]
+universe: [SPY, QQQ, IWM, AAPL, MSFT, AMD, NFLX, TSLA, JPM, LOW, CAT, BAC]
 timeframe: 1Day
 schedule: evaluate hourly during market hours
 rules:
