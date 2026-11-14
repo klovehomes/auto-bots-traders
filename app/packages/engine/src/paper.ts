@@ -114,6 +114,8 @@ interface PaperState {
 
 interface TrendiaParams {
   maxPositionPct: number;
+  /** Minimum purchase size per position (Keith, 2026-11-14); qty is sized up to reach it. */
+  minNotional: number;
   maxPositions: number;
   stopLossPct: number;
   maxDailyLossPct: number;
@@ -161,6 +163,7 @@ export function startPaperTrader(
 ): void {
   const params: TrendiaParams = {
     maxPositionPct: numericOr(bot.risk.max_position_pct, 20),
+    minNotional: numericOr(bot.risk.min_notional, 95),
     maxPositions: numericOr(bot.risk.max_positions, 5),
     stopLossPct: numericOr(bot.risk.stop_loss_pct, 7),
     maxDailyLossPct: numericOr(bot.risk.max_daily_loss_pct, 1.5),
@@ -266,7 +269,7 @@ export function startPaperTrader(
   };
 
   const paramsSnapshot = (): string =>
-    `params snapshot: max_position_pct ${params.maxPositionPct}, max_positions ${params.maxPositions}, ` +
+    `params snapshot: max_position_pct ${params.maxPositionPct}, min_notional ${money(params.minNotional)}, max_positions ${params.maxPositions}, ` +
     `stop_loss ${params.stopLossPct}%, trailing_stop ${TRAILING_STOP_PCT}%, daily_loss_cap ${params.maxDailyLossPct}%`;
 
   let haltCancelHandled = false;
@@ -487,8 +490,16 @@ export function startPaperTrader(
         0,
       ) + state.pendingEntries.reduce((sum, p) => sum + p.estCost, 0);
       const target = bookEquity() * (params.maxPositionPct / 100);
-      const qty = Math.floor(target / last.close);
-      const estCost = qty * last.close;
+      let qty = Math.floor(target / last.close);
+      let estCost = qty * last.close;
+      // Minimum purchase (Keith, 2026-11-14): no position smaller than
+      // $95 notional. The 20% sizing already lands near $2,000 on a
+      // $10,000 book, so this only ever binds for a very high-priced
+      // name — but the floor is enforced, not assumed.
+      if (qty >= 1 && estCost < params.minNotional) {
+        qty = Math.ceil(params.minNotional / last.close);
+        estCost = qty * last.close;
+      }
 
       let verdict: string | null = null;
       if (!regimeOk) {

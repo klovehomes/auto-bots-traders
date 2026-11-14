@@ -8,8 +8,10 @@
  *      in the window (Keith 2026-11-03 — no delta band anymore)
  *   2. liquidity rejects (open interest, bid/ask spread) — checked on
  *      the picked strike only; the chain is never walked
- *   3. premium cap at pick time: exactly 1 contract; one contract over
- *      the 6%-of-book cap ($600 on the $10,000 book) is rejected once
+ *   3. premium cap at pick time: contracts are sized so the premium is
+ *      at least $95 (minimum purchase, Keith 2026-11-14) and at most the
+ *      6%-of-book cap ($600 on the $10,000 book); an over-cap pick is
+ *      rejected once
  *   4. take-profit / stop-loss / time-stop / expiry-guardrail exits
  *   5. earnings guard blocks a name 2 days out; calendar-down fails closed
  *   6. Risk Gate rejections (premium cap, daily loss cap)
@@ -27,6 +29,8 @@
  *      NO TRADE decision carrying the error detail (never just a
  *      console warning), and the hourly summary's outcome counts
  *      close arithmetically on the signal count
+ *  16. minimum purchase (Keith 2026-11-14): a $0.21-mid contract buys
+ *      5 contracts ≈ $105 premium instead of 1 contract for $21
  *
  * Run: npx tsx harness/vega-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -530,7 +534,7 @@ async function main(): Promise<void> {
       s.events.some((e) => e.type === "open" && e.reason.includes("SHADOW")));
     check("shadow: NO orders reached the broker", s.broker.createdOrders.length === 0);
     const entry = s.events.find((e) => e.type === "open" && e.symbol === AMD_CALL);
-    check("shadow: fill assumed at mid $2.00, qty exactly 1 (one-contract rule, 5% OTM strike 105)",
+    check("shadow: fill assumed at mid $2.00, qty 1 ($200 premium ≥ $95 min, 5% OTM strike 105)",
       entry?.price === 2 && entry?.qty === 1, `price=${entry?.price} qty=${entry?.qty}`);
     // IV history recorded for the underlying (§5).
     const st = readState(s.statePath) as { ivByUnderlying?: Record<string, Record<string, number>> };
@@ -622,7 +626,7 @@ async function main(): Promise<void> {
     void postIdx;
     await until("live entry order", () => s.broker.createdOrders.length === 1);
     const created = s.broker.createdOrders[0]!;
-    check("live: entry is a limit-at-mid day order for exactly 1 contract of the picked strike",
+    check("live: entry is a limit-at-mid day order for 1 contract of the picked strike ($200 premium ≥ $95 min)",
       created.symbol === AMD_CALL && created.type === "limit" &&
       created.limitPrice === 2 && created.timeInForce === "day" && created.qty === 1,
       JSON.stringify(created));
@@ -817,7 +821,7 @@ async function main(): Promise<void> {
     } });
     await until("NVDA shadow entry", () =>
       s.events.some((e) => e.type === "open" && e.symbol === NVDA_PICK));
-    check("ceiling: $260 underlying entered — 5% OTM target 273 → strike 275, 1 contract at mid $4.50 ($450 ≤ $600 cap)",
+    check("ceiling: $260 underlying entered — 5% OTM target 273 → strike 275, 1 contract at mid $4.50 ($450 ≥ $95 min, ≤ $600 cap)",
       s.events.some((e) => e.type === "open" && e.symbol === NVDA_PICK && e.qty === 1 && e.price === 4.5));
     check("ceiling: the decision text states the no-ceiling screen",
       s.events.some((e) => e.reason.includes("no price ceiling")));
@@ -921,6 +925,28 @@ async function main(): Promise<void> {
         counts["earnings-blocked"]!,
       line);
     cap.stop();
+  }
+
+  console.log("— S14: minimum purchase — a $0.21-mid contract buys 5 contracts ≈ $105 —");
+  {
+    const s = boot({ shadow: true, setup: (b) => {
+      b.hourlyBars.set("AMD", amdHourlyBars(T0));
+      // Only the 5% OTM strike (105 on spot 100) is listed, quoted
+      // 0.20 / 0.22 (mid $0.21, spread ~9.5% of mid) — the SOFI case
+      // from 2026-11-13, where one contract was only $21 of premium.
+      b.contracts.set("AMD:call", [contract(AMD_CALL, "AMD", "call", 105, "2026-11-20", 5000)]);
+      b.snapshots.set(AMD_CALL, snapshot(AMD_CALL, 0.2, 0.22, 0.44));
+    } });
+    await until("min-premium entry", () =>
+      s.events.some((e) => e.type === "open" && e.symbol === AMD_CALL));
+    const entry = s.events.find((e) => e.type === "open" && e.symbol === AMD_CALL);
+    check("min: $0.21 mid → 5 contracts ≈ $105 premium (≥ $95 min)",
+      entry?.qty === 5 && entry?.price === 0.21, `price=${entry?.price} qty=${entry?.qty}`);
+    const approval = s.events.find(
+      (e) => e.reason.includes("Risk Gate: APPROVED") && e.symbol === AMD_CALL);
+    check("min: decision states 5 contracts and the $95 min",
+      !!approval && approval.reason.includes("5 contracts") &&
+      approval.reason.includes("min $95.00"), approval?.reason);
   }
 
   console.log(

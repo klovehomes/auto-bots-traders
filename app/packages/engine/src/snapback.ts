@@ -58,8 +58,10 @@ import { tradingDaysBetween } from "./vega.js";
  *   in the hourly evaluation summary as "cooldown-skips").
  * - Risk Gate before every entry, with her .md numbers: max position
  *   20% of her virtual book, max 6 positions, 1.5% daily loss cap.
- *   Quantity = floor(20% of book equity / latest price); zero shares
- *   is a logged skip, never a fractional or oversized order.
+ *   Quantity = floor(20% of book equity / latest price), with a $95
+ *   minimum notional (Keith, 2026-11-14) — a computed size under $95
+ *   is sized up to $95; zero shares is a logged skip, never a
+ *   fractional or oversized order.
  * - Kill switch: a halt cancels HER open orders; kill+liquidate closes
  *   ONLY her tracked positions.
  *
@@ -164,6 +166,8 @@ interface SnapbackState {
 
 interface SnapbackParams {
   maxPositionPct: number;
+  /** Minimum purchase size per position (Keith, 2026-11-14); qty is sized up to reach it. */
+  minNotional: number;
   maxPositions: number;
   stopLossPct: number;
   maxDailyLossPct: number;
@@ -199,6 +203,7 @@ export function startSnapbackTrader(
 
   const params: SnapbackParams = {
     maxPositionPct: numericOr(bot.risk.max_position_pct, 20),
+    minNotional: numericOr(bot.risk.min_notional, 95),
     maxPositions: numericOr(bot.risk.max_positions, 6),
     stopLossPct: numericOr(bot.risk.stop_loss_pct, 5),
     maxDailyLossPct: numericOr(bot.risk.max_daily_loss_pct, 1.5),
@@ -354,7 +359,7 @@ export function startSnapbackTrader(
     `params snapshot: universe ${params.universe.length} symbols, trend filter price > ${TREND_PERIOD}DMA, ` +
     `entry z < ${Z_ENTRY} on the ${MEAN_PERIOD}-day mean (population SD) or RSI(${RSI_PERIOD}) < ${RSI_ENTRY}, ` +
     `exits at the ${MEAN_PERIOD}-day mean (only when entered below it) / +${TAKE_PROFIT_PCT}% / stop ${params.stopLossPct}% / 5 trading days max hold, no same-day re-entry after an exit, ` +
-    `max_position_pct ${params.maxPositionPct}, max_positions ${params.maxPositions}, daily_loss_cap ${params.maxDailyLossPct}%`;
+    `max_position_pct ${params.maxPositionPct}, min_notional ${money(params.minNotional)}, max_positions ${params.maxPositions}, daily_loss_cap ${params.maxDailyLossPct}%`;
 
   let haltCancelHandled = false;
   let booted = false;
@@ -837,8 +842,16 @@ export function startSnapbackTrader(
           0,
         ) + state.pendingEntries.reduce((sum, p) => sum + p.estCost, 0);
       const target = bookEquity() * (params.maxPositionPct / 100);
-      const qty = Math.floor(target / price);
-      const estCost = qty * price;
+      let qty = Math.floor(target / price);
+      let estCost = qty * price;
+      // Minimum purchase (Keith, 2026-11-14): no position smaller than
+      // $95 notional. The 20% sizing already lands near $2,000 on a
+      // $10,000 book, so this only ever binds for a very high-priced
+      // name — but the floor is enforced, not assumed.
+      if (qty >= 1 && estCost < params.minNotional) {
+        qty = Math.ceil(params.minNotional / price);
+        estCost = qty * price;
+      }
 
       let verdict: string | null = null;
       if (dailyCapHit) {

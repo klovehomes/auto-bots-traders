@@ -6,7 +6,7 @@ mode: paper
 market: us_stocks
 broker: alpaca
 strategy: mean_reversion
-universe: [SPY, QQQ, IWM, AAPL, MSFT, AMD, NFLX, TSLA, JPM, LOW, CAT, BAC, NVDA, META, AMZN, GOOGL, AVGO, COST, PLTR]
+universe: [SPY, QQQ, IWM, AAPL, MSFT, AMD, NFLX, TSLA, JPM, LOW, CAT, BAC, NVDA, META, AMZN, GOOGL, AVGO, COST, PLTR, SOXL]
 timeframe: 1Day
 schedule: evaluate hourly during market hours
 rules:
@@ -15,6 +15,7 @@ rules:
   exit: price returns to the 20-day mean, or +4%, or 5 trading days max hold
 risk:
   max_position_pct: 20
+  min_notional: 95 (minimum purchase size per position)
   max_positions: 6
   stop_loss_pct: 5
   max_daily_loss_pct: 1.5

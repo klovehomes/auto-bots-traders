@@ -258,7 +258,12 @@ export function startSimulator(
     if (universe.length === 0) return;
     const symbol = universe[Math.floor(rng() * universe.length)]!;
     const price = series(symbol).price;
-    const qty = Math.max(1, Math.floor(budget(state) / price));
+    // Minimum purchase (Keith, 2026-11-14): no stock position under $95
+    // notional. The 20%-of-book budget already lands near $2,000, so
+    // this is a guard, not a change to typical sim sizing.
+    const minNotional = numericOr(state.bot.risk.min_notional, 95);
+    let qty = Math.max(1, Math.floor(budget(state) / price));
+    if (qty * price < minNotional) qty = Math.ceil(minNotional / price);
     const reason =
       state.bot.codename === "trendia"
         ? `20-day high breakout; RSI(14) ${55 + Math.floor(rng() * 25)}; above 200DMA`
@@ -283,7 +288,13 @@ export function startSimulator(
     const expiry = ["Nov 7", "Nov 14", "Nov 21"][Math.floor(rng() * 3)]!;
     const label = `${underlying} ${strike}${isCall ? "C" : "P"} ${expiry}`;
     const premium = round2(spot * (0.04 + rng() * 0.04));
-    const contracts = Math.max(1, Math.round(budget(state) / (premium * 100)));
+    // Minimum purchase (Keith, 2026-11-14): no Vega position under $95
+    // of premium — contracts sized up to reach it, same as the paper runner.
+    const minPremium = numericOr(state.bot.risk.min_premium_dollars, 95);
+    let contracts = Math.max(1, Math.round(budget(state) / (premium * 100)));
+    if (contracts * premium * 100 < minPremium) {
+      contracts = Math.ceil(minPremium / (premium * 100));
+    }
     state.positions.push({
       label, priceKey: underlying, kind: "optionLong", side: "buy",
       qty: contracts, entryPrice: spot, displayEntryPrice: premium,

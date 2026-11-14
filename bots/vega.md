@@ -16,10 +16,11 @@ rules:
   volatility_screen: 20-day ATR at least 3.5% of share price, or implied-vol percentile 70+
   options_liquidity: open interest 1,000+ contracts and bid/ask spread within 10% of mid
   holdings_mix: 75% of invested capital in options, 25% in shares of the same underlyings (rebalance band 70–80%)
-  contracts: long calls on bullish breakouts, long puts on bearish breakdowns; strike 5% out of the money (nearest listed strike at-or-beyond 5% OTM); exactly one contract per position; expiry 2–4 weeks out
+  contracts: long calls on bullish breakouts, long puts on bearish breakdowns; strike 5% out of the money (nearest listed strike at-or-beyond 5% OTM); contracts sized so premium is at least $95 per position, never over the 6% cap; expiry 2–4 weeks out
   earnings_guard: no new entries within 5 days of the underlying's earnings report
 risk:
   max_position_pct: 6 (premium paid per options position)
+  min_premium_dollars: 95 (minimum premium paid per options position; contracts are sized up to reach it)
   max_positions: 6
   stop_loss_pct: 35 (of premium paid — for options, the premium is the risk unit)
   take_profit_pct: 50 (of premium paid)
@@ -42,7 +43,7 @@ the price of the option, not the stock.
 
 Three quarters of my book is options: long calls when a volatile name
 breaks up, long puts when it breaks down, struck 5% out of the money with
-two to four weeks of life, one contract at a time. The remaining quarter sits in shares of the same
+two to four weeks of life, sized so each position puts at least $95 of premium to work (never more than the 6% cap). The remaining quarter sits in shares of the same
 underlyings — ballast and hedge in one. I never sell naked premium: every
 position is defined-risk, and the most I can lose on a contract is the
 premium I paid for it.

@@ -6,7 +6,7 @@ mode: paper
 market: us_stocks
 broker: alpaca
 strategy: momentum_trend
-universe: [SPY, QQQ, AAPL, MSFT, NVDA, AMZN, META, GOOGL, AVGO, COST,MRVL,AMDL,CRWD,HD,MU,PLTR,SBUX,TGT,TJX,XYZ,ZM,XLV,XLP, JPM, LOW, CAT, BAC, V, MA, LLY, UNH, XOM, BRK.B]
+universe: [SPY, QQQ, AAPL, MSFT, NVDA, AMZN, META, GOOGL, AVGO, COST,MRVL,AMDL,CRWD,HD,MU,PLTR,SBUX,TGT,TJX,XYZ,ZM,XLV,XLP, JPM, LOW, CAT, BAC, V, MA, LLY, UNH, XOM, BRK.B, SOXL]
 timeframe: 1Day
 schedule: evaluate at market close, trade next open
 rules:
@@ -15,6 +15,7 @@ rules:
   exit: 8% trailing stop, or close below the 50DMA
 risk:
   max_position_pct: 20
+  min_notional: 95 (minimum purchase size per position)
   max_positions: 5
   stop_loss_pct: 7
   max_daily_loss_pct: 1.5

@@ -51,8 +51,9 @@ import {
  *   spread ≤ 10% of mid are checked on that one strike only — if it
  *   fails, the name is rejected for the cycle (no walking the chain).
  *   Delta is recorded in the decision record, informational only.
- * - Premium cap, enforced at pick time: exactly 1 contract per
- *   position, and that contract at mid (mid × 100) must cost ≤ 6% of
+ * - Premium cap, enforced at pick time: contracts are sized so the
+ *   premium is at least $95 per position (Keith, 2026-11-14 — minimum
+ *   purchase), and that premium (qty × mid × 100) must cost ≤ 6% of
  *   his virtual book — $600 on the $10,000 starting book (Keith,
  *   2026-11-03). A pick over the cap is a logged rejection, once.
  * - Risk Gate: max 6 positions, 3% daily loss cap, book-commitment
@@ -188,6 +189,8 @@ interface VegaParams {
   /** Underlying price floor — there is deliberately no ceiling (Keith, 2026-11-03). */
   priceMin: number;
   maxPositionPct: number;
+  /** Minimum premium paid per position (Keith, 2026-11-14); qty is sized up to reach it. */
+  minPremiumDollars: number;
   maxPositions: number;
   stopLossPct: number;
   takeProfitPct: number;
@@ -389,6 +392,7 @@ export function startVegaTrader(
     ),
     priceMin: leadingNumber(bot.rules.underlying_price_min, 5),
     maxPositionPct: leadingNumber(bot.risk.max_position_pct, 6),
+    minPremiumDollars: leadingNumber(bot.risk.min_premium_dollars, 95),
     maxPositions: leadingNumber(bot.risk.max_positions, 6),
     stopLossPct: leadingNumber(bot.risk.stop_loss_pct, 35),
     takeProfitPct: leadingNumber(bot.risk.take_profit_pct, 50),
@@ -571,7 +575,7 @@ export function startVegaTrader(
 
   const paramsSnapshot = (): string =>
     `params snapshot: pool ${params.pool.length} symbols, price floor ${money(params.priceMin)} with no price ceiling, ` +
-    `ATR(${ATR_PERIOD}) ≥ ${ATR_MIN_PCT}% of price, strike ${OTM_TARGET_PCT}% out of the money (nearest listed at-or-beyond), exactly 1 contract per position, expiry ${EXPIRY_MIN_DAYS}–${EXPIRY_MAX_DAYS} days, ` +
+    `ATR(${ATR_PERIOD}) ≥ ${ATR_MIN_PCT}% of price, strike ${OTM_TARGET_PCT}% out of the money (nearest listed at-or-beyond), contracts sized so premium ≥ ${money(params.minPremiumDollars)} and ≤ ${params.maxPositionPct}% of book, expiry ${EXPIRY_MIN_DAYS}–${EXPIRY_MAX_DAYS} days, ` +
     `OI ≥ ${OI_MIN.toLocaleString("en-US")}, spread ≤ ${SPREAD_MAX_PCT}% of mid, premium cap ${params.maxPositionPct}% of book, ` +
     `max_positions ${params.maxPositions}, stop ${params.stopLossPct}%, take_profit ${params.takeProfitPct}%, ` +
     `time_stop ${params.timeStopDays} trading days, daily_loss_cap ${params.maxDailyLossPct}%, earnings guard ${EARNINGS_GUARD_DAYS} days`;
@@ -1212,7 +1216,12 @@ export function startVegaTrader(
       const { contract, snapshot } = pick.candidate;
       // The pick's liquidity gates guarantee a two-sided quote.
       const mid = snapshot.mid!;
-      const premiumDollars = mid * 100; // exactly 1 contract
+      // Minimum purchase (Keith, 2026-11-14): size the position up so
+      // the premium is at least minPremiumDollars ($95). At a $0.21 mid
+      // that is 5 contracts ≈ $105; at a $2.00 mid it is still 1 ($200).
+      // The 6% cap below applies to the SCALED total, not one contract.
+      const qty = Math.max(1, Math.ceil(params.minPremiumDollars / (mid * 100)));
+      const premiumDollars = qty * mid * 100;
       const contractText =
         `contract ${contract.symbol}: ${symbol} ${contract.strike} ${direction}, exp ${contract.expiry}, ` +
         `strike ${OTM_TARGET_PCT}% out of the money (spot ${money(price)}, target ${money(pick.targetStrike)}), ` +
@@ -1220,11 +1229,11 @@ export function startVegaTrader(
         `OI ${contract.openInterest.toLocaleString("en-US")}, bid ${snapshot.bid.toFixed(2)} / ask ${snapshot.ask.toFixed(2)} / mid ${mid.toFixed(2)}`;
 
       // ---- Premium cap (enforced at pick time, Keith 2026-11-03) ------
-      // Exactly 1 contract per position; that contract at mid must cost
-      // ≤ maxPositionPct% of the book ($600 on the $10,000 start). This
-      // is the cap check — the Risk Gate below uses the same book equity
-      // and never re-litigates premium, so an over-cap pick produces
-      // exactly one rejection record.
+      // Contracts are sized up to the $95 minimum first; that SCALED
+      // premium must cost ≤ maxPositionPct% of the book ($600 on the
+      // $10,000 start). This is the cap check — the Risk Gate below uses
+      // the same book equity and never re-litigates premium, so an
+      // over-cap pick produces exactly one rejection record.
       const capDollars = bookEquity() * (params.maxPositionPct / 100);
       if (premiumDollars > capDollars + 1e-9) {
         gateRejected += 1;
@@ -1232,12 +1241,12 @@ export function startVegaTrader(
           type: "signal",
           symbol: contract.symbol,
           side: "buy",
-          qty: 1,
+          qty,
           price: round2(snapshot.ask),
           pnl: null,
           reason:
             `${tag} · ENTRY signal — ${screenText} · ${contractText} · Risk Gate: REJECTED — ` +
-            `premium cap: one contract at mid ${money(mid)} costs ${money(premiumDollars)}, over the ${params.maxPositionPct}% premium cap (${money(capDollars)} of the ${money(bookEquity())} book) · ${paramsSnapshot()}`,
+            `premium cap: ${qty} contract${qty > 1 ? "s" : ""} at mid ${money(mid)} cost${qty > 1 ? "" : "s"} ${money(premiumDollars)}, over the ${params.maxPositionPct}% premium cap (${money(capDollars)} of the ${money(bookEquity())} book) · ${paramsSnapshot()}`,
         });
         continue;
       }
@@ -1245,7 +1254,6 @@ export function startVegaTrader(
       // ---- Risk Gate ---------------------------------------------------
       const openCount =
         Object.keys(book()).length + (shadow ? 0 : state.pendingEntries.length);
-      const qty = 1;
       const committed = Object.values(book()).reduce(
         (sum, p) => sum + p.entryPremium * p.qty * 100,
         0,
@@ -1286,7 +1294,7 @@ export function startVegaTrader(
         pnl: null,
         reason:
           `${tag} · ENTRY signal — ${screenText} · ${contractText} · Risk Gate: APPROVED — ` +
-          `${qty} contract ≈ ${money(premiumDollars)} premium at mid (cap ${money(capDollars)} = ${params.maxPositionPct}% of the ${money(bookEquity())} book); ` +
+          `${qty} contract${qty > 1 ? "s" : ""} ≈ ${money(premiumDollars)} premium at mid (min ${money(params.minPremiumDollars)}, cap ${money(capDollars)} = ${params.maxPositionPct}% of the ${money(bookEquity())} book); ` +
           `positions ${openCount}/${params.maxPositions}; earnings clear · ${paramsSnapshot()} · ` +
           (shadow
             ? "order intent ONLY — shadow mode places no broker orders"

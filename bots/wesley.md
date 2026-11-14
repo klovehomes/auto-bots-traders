@@ -22,6 +22,7 @@ rules:
   liquidity: weekly options required; open interest 500+ and bid/ask within 8% of mid
 risk:
   max_position_pct: 100 (one position may use the whole account — the wheel trades in 100-share blocks, strike x 100, so smaller caps make most of the $5–$55 band untradable)
+  min_notional: 95 (minimum purchase size per position — satisfied by construction, the wheel trades in 100-share blocks so one contract always commits at least $450 of capital at the $5 price floor)
   max_positions: 4
   assignment: accepted by design — puts are only sold on stocks Wesley is content to own
   defense: buy back a short option at 2x the premium collected, or roll it out before it gets there
