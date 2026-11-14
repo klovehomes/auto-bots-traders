@@ -8,7 +8,7 @@ broker: alpaca
 strategy: options_volatility
 universe: screened daily by the rules below — no fixed list
 watchlist_examples: [AMD, PLTR, SMCI, COIN, HOOD, MARA, SOFI, RIVN, RIOT, AFRM, IONQ, SOXL, TQQQ, UVXY]
-candidate_pool: [AMD, PLTR, SMCI, COIN, HOOD, MARA, SOFI, RIVN, AFRM, IONQ, SOXL, TQQQ, UVXY, NVDA, MSTR, ARM, UPST, NIO, SNAP, DKNG, RBLX, UBER, XYZ, SHOP, NET, RIOT, GME, ARKK, XBI, SQQQ, NVDL, CAVA]
+candidate_pool: [AMD, PLTR, SMCI, COIN, HOOD, MARA, SOFI, RIVN, AFRM, IONQ, SOXL, TQQQ, UVXY, NVDA, MSTR, ARM, UPST, NIO, SNAP, DKNG, RBLX, UBER, XYZ, SHOP, NET, RIOT, GME, ARKK, XBI, SQQQ, NVDL, CAVA, TSLA, APP, RDDT, HIMS, ASTS, CRWD, MRVL, MU, AVGO, DELL, CVNA, ANET, LRCX, OKLO, SMR, QBTS, RGTI, SOUN, BBAI, OPEN]
 timeframe: 1Hour
 schedule: evaluate hourly during market hours, weekdays 09:30–16:00 ET
 rules:

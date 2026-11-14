@@ -66,6 +66,7 @@ const wesleyBot: BotConfig = {
   strategy: "options_income_wheel",
   viz: { color: "#4ade80", form: "avatar_disc", avatar_accessory: "bow tie" },
   watchlist_examples: ["F", "INTC", "BAC", "PFE", "T", "VZ", "SOFI", "RIVN", "NU", "WBD", "DRAM", "CAVA", "CART"],
+  candidate_pool: ["F", "INTC", "BAC", "PFE", "T", "VZ", "SOFI", "RIVN", "NU", "WBD", "DRAM", "CAVA", "CART", "DKNG", "AAL", "KHC", "KMI", "ET"],
   rules: { underlying_price_min: 5, underlying_price_max: 55 },
   risk: {
     max_position_pct: "100 (one position may use the whole account)",
