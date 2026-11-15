@@ -1259,3 +1259,183 @@ body {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+/* ---------- Watch List + Add Symbols (v30, bot inspect dialog) ------ */
+.watch-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.btn.active {
+  border-color: #2f6feb;
+  color: #8db4f5;
+  background: rgba(31, 111, 235, 0.14);
+}
+
+.btn.primary {
+  border-color: #2f6feb;
+  background: #1f6feb;
+  color: #ffffff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #2b7aef;
+}
+
+.watch-panel {
+  margin-top: 10px;
+  border: 1px solid #1b2740;
+  border-radius: 10px;
+  background: rgba(13, 20, 36, 0.6);
+  padding: 10px 12px;
+}
+
+.watch-count {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #8b98a9;
+}
+
+.watch-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.chip {
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 4px 9px;
+  border: 1px solid #22304a;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #e6edf3;
+  white-space: nowrap;
+}
+
+.chip.new {
+  border-color: #3fb950;
+  color: #7ee2a0;
+  background: rgba(63, 185, 80, 0.12);
+}
+
+.chip .tag {
+  font-size: 10px;
+  font-weight: 700;
+  color: #3fb950;
+  margin-left: 4px;
+}
+
+.watch-more {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #8b98a9;
+}
+
+.watch-error,
+.search-error {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: #f85149;
+}
+
+.watch-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #8b98a9;
+}
+
+/* "Restart now" (v30): sits at the end of the add-success note, inline
+ * with the text — it reads as part of that notification, not as a
+ * general dialog control. */
+.watch-note .restart-btn {
+  margin-left: 4px;
+  vertical-align: baseline;
+}
+
+.watch-note.restart-note {
+  color: #3fb950;
+}
+
+.add-panel {
+  margin-top: 10px;
+  border: 1px solid #1b2740;
+  border-radius: 10px;
+  background: rgba(13, 20, 36, 0.6);
+  padding: 12px;
+}
+
+.symbol-search {
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #e6edf3;
+  background: #05070f;
+  border: 1px solid #22304a;
+  border-radius: 9px;
+  outline: none;
+}
+
+.symbol-search:focus {
+  border-color: #2f6feb;
+}
+
+.search-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.search-result {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.search-result:hover:not(.in-list) {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.search-result.sel {
+  background: rgba(31, 111, 235, 0.18);
+  border-color: #2f6feb;
+}
+
+.search-result.in-list {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.search-result .result-name {
+  color: #8b98a9;
+  font-size: 12.5px;
+}
+
+.search-result .result-meta {
+  color: #8b98a9;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.submit-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.added-note {
+  font-size: 12.5px;
+  color: #3fb950;
+}

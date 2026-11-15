@@ -6,11 +6,20 @@ import {
   fleetEventSchema,
   fleetModeSchema,
   getPaperKeys,
+  loadBotFile,
   loadBots,
   marketWeatherSchema,
   parseFleetMode,
   resolveBotsDir,
 } from "@fleet/shared";
+import {
+  appendCandidate,
+  CandidateError,
+  fetchAsset,
+  normalizeSymbol,
+  readCandidates,
+  searchAssets,
+} from "./candidates.js";
 import {
   ControlStore,
   type AuditEntry,
@@ -72,6 +81,12 @@ const LIQUIDATION_WAIT_MS = 10_000;
  *  on their next ≤30 s tick, so a still-pending answer is normal there;
  *  sim applies within about a second. */
 const RESET_WAIT_MS = 10_000;
+/** Same contract for an engine restart POST (v30): the engine polls
+ *  every 1 s and Docker relaunches it, so a fresh boot usually
+ *  consumes the request inside a few seconds; a still-pending answer
+ *  after the wait just means the engine is slow to come back, and the
+ *  restart still lands. */
+const RESTART_WAIT_MS = 10_000;
 
 async function main(): Promise<void> {
   const app = Fastify({ logger: true });
@@ -173,6 +188,116 @@ async function main(): Promise<void> {
   app.get("/health", async () => ({ ok: true, mode: MODE }));
 
   app.get("/bots", async () => bots);
+
+  // Watch List candidates (v30): the per-bot tradable list behind the
+  // dialog's Watch List panel. Read straight from the .md file on
+  // disk on every call — the boot-time `bots` array above goes stale
+  // the moment a POST below edits a file. Same trust boundary as the
+  // other read endpoints (private network).
+  app.get<{ Params: { codename: string } }>(
+    "/bots/:codename/candidates",
+    async (request, reply) => {
+      const found = readCandidates(botsDir, request.params.codename);
+      if (!found) {
+        return reply
+          .code(404)
+          .send({ error: `unknown bot: ${request.params.codename}` });
+      }
+      const { sourcePath: _sourcePath, ...publicList } = found;
+      return publicList;
+    },
+  );
+
+  // Add one symbol to a bot's candidate list (v30). The symbol is
+  // validated server-side — shape, not already listed, and it must
+  // exist as an active tradable US equity per Alpaca — before the
+  // .md file is touched. The write appends to the one list line;
+  // the in-memory `bots` entry is refreshed so GET /bots agrees.
+  // Honest restart note: runners capture their pool at boot, so the
+  // new symbol becomes tradable after the next engine restart — the
+  // response says so instead of implying it is live immediately.
+  app.post<{ Params: { codename: string } }>(
+    "/bots/:codename/candidates",
+    async (request, reply) => {
+      const body = request.body as { symbol?: unknown } | null;
+      try {
+        const symbol = normalizeSymbol(body?.symbol);
+        const current = readCandidates(botsDir, request.params.codename);
+        if (!current) {
+          return reply
+            .code(404)
+            .send({ error: `unknown bot: ${request.params.codename}` });
+        }
+        if (!current.editable) {
+          return reply.code(400).send({
+            error: `${current.name} has no stock candidate list — her crypto pairs are fixed in the engine`,
+          });
+        }
+        if (current.symbols.includes(symbol)) {
+          return reply.code(409).send({
+            error: `${symbol} is already in ${current.name}'s candidate list`,
+          });
+        }
+        const keys = getPaperKeys();
+        const asset = await fetchAsset(symbol, {
+          keyId: keys.alpacaKeyId,
+          secretKey: keys.alpacaSecretKey,
+        });
+        if (!asset) {
+          return reply.code(400).send({
+            error: `unknown symbol: ${symbol} is not an active tradable US equity`,
+          });
+        }
+        const after = appendCandidate(botsDir, request.params.codename, symbol);
+        const idx = bots.findIndex((b) => b.codename === after.codename);
+        if (idx >= 0) bots[idx] = loadBotFile(after.sourcePath);
+        return {
+          ok: true,
+          codename: after.codename,
+          name: after.name,
+          field: after.field,
+          symbols: after.symbols,
+          added: symbol,
+          appliesOn: "engine restart",
+          note:
+            `${symbol} added to ${after.name}'s candidate list. ` +
+            `The running engine loads bot configs at boot, so the new symbol ` +
+            `becomes tradable after the next engine restart.`,
+        };
+      } catch (err) {
+        if (err instanceof CandidateError) {
+          return reply.code(err.status).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // Symbol search (v30): live Alpaca asset lookup for the dialog's
+  // Add Symbols typeahead — ticker or company name, as the user
+  // types. Results are real Alpaca assets only; there is no local
+  // symbol directory to go stale. 503 when no Alpaca keys are
+  // configured (the dashboard shows that plainly instead of an
+  // empty list that looks like "no matches").
+  app.get("/symbols/search", async (request, reply) => {
+    const q = (request.query as { q?: unknown } | undefined)?.q;
+    if (typeof q !== "string" || q.trim().length === 0) {
+      return reply.code(400).send({ error: "missing search query (q)" });
+    }
+    try {
+      const keys = getPaperKeys();
+      const results = await searchAssets(q, {
+        keyId: keys.alpacaKeyId,
+        secretKey: keys.alpacaSecretKey,
+      });
+      return { results };
+    } catch (err) {
+      if (err instanceof CandidateError) {
+        return reply.code(err.status).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
 
   // Paper-keys status (Phase 12, v21): PRESENCE ONLY. The shared
   // loader's status surface is the whole answer — per-provider loaded
@@ -349,6 +474,47 @@ async function main(): Promise<void> {
     },
   );
 
+  // Engine restart (v30) — the "Restart now" button in the Watch List
+  // add-success notification. POST only: there is deliberately no GET
+  // that restarts anything. Records the request in the API-owned
+  // control state; the engine observes it on its 1 s control poll and
+  // exits cleanly, Docker relaunches it, and the relaunch reloads the
+  // bot .md files (a newly added candidate symbol becomes tradable).
+  // A restart reloads configs only — it halts nothing, closes no
+  // positions, wipes no state. Same trust boundary as the kill switch
+  // above: private network only, never exposed publicly. The POST
+  // waits (bounded, like runReset) for the fresh engine boot to
+  // consume the request, so the common answer confirms the restart
+  // actually happened rather than just being requested.
+  app.post("/engine/restart", async (request) => {
+    const body = request.body as { symbol?: unknown } | null;
+    const detail =
+      typeof body?.symbol === "string" && body.symbol.trim() !== ""
+        ? `${body.symbol.trim().toUpperCase()} added to a watch list`
+        : undefined;
+    const entry = control.requestRestart("web-ui", detail);
+    if (!entry) {
+      return {
+        ok: true,
+        alreadyPending: true,
+        restarted: false,
+        note: "A restart is already requested — the engine will restart shortly.",
+      };
+    }
+    broadcastControl(entry);
+    const requested = control.internalState().pendingRestart;
+    const restarted = await control.waitForRestart(RESTART_WAIT_MS);
+    return {
+      ok: true,
+      alreadyPending: false,
+      restarted,
+      restart: requested,
+      note: restarted
+        ? "Engine restarted — all five bots reloaded with the new list. Positions kept."
+        : "Restart requested — the engine is restarting; the new symbol becomes tradable once it is back.",
+    };
+  });
+
   // Engine-facing control channel (internal token, same as events).
   // Phase 5: the payload also carries the fleet's desired mode, which
   // is how a running engine learns the dashboard switch was flipped.
@@ -426,6 +592,21 @@ async function main(): Promise<void> {
     }
     broadcastControl(entry);
     return { ok: true };
+  });
+
+  // A fresh engine process consumes any pending restart request at
+  // boot, before its first control poll (v30): a fresh boot IS the
+  // restart, so the request is satisfied by definition — and clearing
+  // before the first poll keeps the rebooted engine from seeing the
+  // stale flag and exiting again in a loop. Idempotent: returns the
+  // cleared request, or null when none was pending. Same internal
+  // token as the other engine reports.
+  app.post("/internal/control/restart-consumed", async (request, reply) => {
+    if (request.headers["x-internal-token"] !== INTERNAL_EVENT_TOKEN) {
+      return reply.code(401).send({ error: "invalid internal token" });
+    }
+    const cleared = control.clearRestart();
+    return { ok: true, cleared: cleared?.id ?? null };
   });
 
   // Engine → API ingestion. Internal only: guarded by a shared token and,

@@ -182,8 +182,10 @@ async function main(): Promise<void> {
             : ""),
       );
     },
-    onControlState: (state) =>
-      modeSupervisor.observeDesiredMode(state.desiredMode),
+    onControlState: (state) => {
+      modeSupervisor.observeDesiredMode(state.desiredMode);
+      modeSupervisor.observeRestartRequest(state.pendingRestart);
+    },
   });
   control.start();
   modeSupervisor.startReporting();

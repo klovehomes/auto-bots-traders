@@ -12,7 +12,8 @@ RUN npm ci
 
 COPY . .
 
-# Bot .md files are mounted here by docker-compose (read-only).
+# Bot .md files are mounted here by docker-compose (read-only for
+# the engine; writable for the api since v30 Add Symbols).
 ENV BOTS_DIR=/bots
 ENV API_PORT=8080
 EXPOSE 8080

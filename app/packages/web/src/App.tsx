@@ -46,7 +46,7 @@ export interface AuditEntry {
   scope: "bot" | "fleet";
   /** Bot codename for scope="bot"; null for fleet actions. */
   target: string | null;
-  action: "kill" | "kill-liquidate" | "resume" | "reset";
+  action: "kill" | "kill-liquidate" | "resume" | "reset" | "restart";
   source: string;
   changed: string[];
   liquidation?: LiquidationReport;
@@ -65,6 +65,9 @@ export interface ControlState {
   audit: AuditEntry[];
   /** True while a Reset All Data (v22) is still being executed. */
   pendingReset: boolean;
+  /** True while an engine restart (v30) has been requested but the
+   *  fresh engine process has not booted yet to consume it. */
+  pendingRestart: boolean;
 }
 
 interface ControlMessage {
@@ -140,6 +143,8 @@ export function describeControl(
       return entry.reset?.status === "complete"
         ? "🧹 TEAM DATA RESET — history wiped, books back to $10,000, team halted"
         : "🧹 TEAM DATA RESET — wiping history and books…";
+    if (entry.action === "restart")
+      return "🔄 ENGINE RESTART — reloading bot configs, positions kept";
     if (entry.action === "kill") return "⛔⛔ TEAM KILL — all bots halted";
     if (entry.action === "resume") return "▶▶ TEAM RESUMED — all bots trading";
     return `⛔⛔ TEAM KILL + LIQUIDATE${liqText}`;
@@ -1178,7 +1183,9 @@ export function App() {
                                 ? "▶"
                                 : entry.action === "reset"
                                   ? "🧹"
-                                  : "⛔"}
+                                  : entry.action === "restart"
+                                    ? "🔄"
+                                    : "⛔"}
                             </span>
                           )}
                           <span className="event-main">
@@ -1283,6 +1290,7 @@ export function App() {
         botByName.get(inspect.name) &&
         stats.get(inspect.name) && (
           <BuildingInspect
+            key={botByName.get(inspect.name)!.codename}
             bot={botByName.get(inspect.name)!}
             stats={stats.get(inspect.name)!}
             trades={events
@@ -1503,6 +1511,55 @@ export function App() {
   );
 }
 
+/** One row of GET /symbols/search (v30): a real Alpaca asset. */
+interface SymbolResult {
+  symbol: string;
+  name: string;
+  exchange: string;
+}
+
+/** Shape of GET /bots/:codename/candidates (v30). */
+interface CandidatesResponse {
+  codename: string;
+  name: string;
+  field: string;
+  symbols: string[];
+  editable: boolean;
+}
+
+/**
+ * A bot's candidate list from the already-loaded GET /bots config —
+ * the dialog's first paint, before the server refresh on expand.
+ * Mirrors the API's rule (api/src/candidates.ts): Trendia/Snapback
+ * read `universe`, Vega/Wesley read `candidate_pool` (falling back to
+ * `watchlist_examples`), PolyCrypt9000 shows her three crypto pairs
+ * and is not editable — she trades no stocks.
+ */
+function candidateListFromBot(bot: BotConfig): {
+  symbols: string[];
+  editable: boolean;
+} {
+  if (bot.codename === "polycrypt9000") {
+    return { symbols: ["BTC/USD", "ETH/USD", "SOL/USD"], editable: false };
+  }
+  if (Array.isArray(bot.universe)) {
+    return {
+      symbols: bot.universe.filter((v): v is string => typeof v === "string"),
+      editable: true,
+    };
+  }
+  if (Array.isArray(bot.candidate_pool) && bot.candidate_pool.length > 0) {
+    return { symbols: [...bot.candidate_pool], editable: true };
+  }
+  if (
+    Array.isArray(bot.watchlist_examples) &&
+    bot.watchlist_examples.length > 0
+  ) {
+    return { symbols: [...bot.watchlist_examples], editable: true };
+  }
+  return { symbols: [], editable: true };
+}
+
 interface BuildingInspectProps {
   bot: BotConfig;
   stats: BotStats;
@@ -1527,12 +1584,15 @@ interface BuildingInspectProps {
  * Building inspect dialog: opened by hovering (desktop) or tapping
  * (phone) a building in the landscape. Shows the bot's picker-resolved
  * avatar, equity and realized PnL, its CURRENT HOLDINGS (open positions
- * from the client team state) and, below them, TODAY'S TRADES — all
- * live: the App re-renders on every event, so an open dialog updates in
- * place. (Data note: since Phase 6 the App seeds from the API's
- * persisted event history — GET /events/history — and merges the live
- * stream by sequence number, so "today" is the stored history plus
- * this session's live events, not just what streamed past this tab.)
+ * from the client team state) — always visible — and, below the Watch
+ * List buttons, the v30 sections, collapsed by default: the bot's
+ * WATCH LIST (candidate list), ADD SYMBOLS (live Alpaca search +
+ * Submit, persisted server-side) and TODAY'S TRADES. All live: the App
+ * re-renders on every event, so an open dialog updates in place.
+ * (Data note: since Phase 6 the App seeds from the API's persisted
+ * event history — GET /events/history — and merges the live stream by
+ * sequence number, so "today" is the stored history plus this session's
+ * live events, not just what streamed past this tab.)
  *
  * Position: the scene publishes the building's name-plate anchor every
  * frame; this dialog re-reads it on its own rAF and pins itself under
@@ -1587,12 +1647,199 @@ function BuildingInspect({
     return () => cancelAnimationFrame(raf);
   }, [anchorRef, bot.name]);
 
+  // --- Watch List + Add Symbols (v30) ---------------------------------
+  // Collapsed by default: everything below the two buttons (watch
+  // list, add symbols, today's trades) stays hidden until Watch List
+  // is tapped. Current holdings sits above the buttons and is always
+  // visible. The candidate list starts from the already-loaded bot
+  // config and refreshes from the server on expand, so an add made in
+  // another tab (or by the API) shows up here.
+  const initialCandidates = useMemo(() => candidateListFromBot(bot), [bot]);
+  const [expanded, setExpanded] = useState(false);
+  const [candidates, setCandidates] = useState<string[]>(
+    initialCandidates.symbols,
+  );
+  const [candidatesEditable, setCandidatesEditable] = useState(
+    initialCandidates.editable,
+  );
+  const [candidatesError, setCandidatesError] = useState<string | null>(null);
+  const [justAdded, setJustAdded] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SymbolResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [selectedSym, setSelectedSym] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitNote, setSubmitNote] = useState<string | null>(null);
+  // Engine restart (v30): the "Restart now" button lives at the end
+  // of the add-success notification above — it appears only after a
+  // successful add, and restarts the whole engine (all five bots) so
+  // the new symbol becomes tradable.
+  const [restarting, setRestarting] = useState(false);
+  const [restartDone, setRestartDone] = useState(false);
+  const [restartNote, setRestartNote] = useState<string | null>(null);
+  const [restartError, setRestartError] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchSeqRef = useRef(0);
+
+  useEffect(() => {
+    if (!expanded) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/bots/${bot.codename}/candidates`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<CandidatesResponse>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setCandidates(data.symbols);
+        setCandidatesEditable(data.editable);
+        setCandidatesError(null);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCandidatesError(
+            "Could not refresh the watch list from the server — showing the list from page load.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, bot.codename]);
+
+  // Live typeahead: debounced 300 ms; a stale (superseded) response
+  // is dropped by sequence number so fast typing never shows an old
+  // query's matches under the new one.
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length === 0) {
+      setResults([]);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const seq = ++searchSeqRef.current;
+    const timer = window.setTimeout(() => {
+      fetch(`${API_BASE}/symbols/search?q=${encodeURIComponent(q)}`)
+        .then(async (res) => {
+          if (!res.ok) {
+            const body = (await res.json().catch(() => null)) as {
+              error?: string;
+            } | null;
+            throw new Error(body?.error ?? `HTTP ${res.status}`);
+          }
+          return res.json() as Promise<{ results: SymbolResult[] }>;
+        })
+        .then((data) => {
+          if (searchSeqRef.current !== seq) return;
+          setResults(data.results);
+          setSearchError(null);
+        })
+        .catch((err: unknown) => {
+          if (searchSeqRef.current !== seq) return;
+          setResults([]);
+          setSearchError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (searchSeqRef.current === seq) setSearching(false);
+        });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const openAddSymbols = (): void => {
+    setExpanded(true);
+    window.setTimeout(() => searchInputRef.current?.focus(), 50);
+  };
+
+  const submitAdd = async (): Promise<void> => {
+    if (!selectedSym || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    setSubmitNote(null);
+    setRestarting(false);
+    setRestartDone(false);
+    setRestartNote(null);
+    setRestartError(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/bots/${bot.codename}/candidates`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ symbol: selectedSym }),
+        },
+      );
+      const data = (await res.json().catch(() => null)) as {
+        symbols?: string[];
+        added?: string;
+        note?: string;
+        error?: string;
+      } | null;
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setCandidates(
+        data?.symbols ?? [...candidates, selectedSym],
+      );
+      setJustAdded(data?.added ?? selectedSym);
+      setSubmitNote(
+        data?.note ?? "Tradable after the next engine restart.",
+      );
+      setQuery("");
+      setResults([]);
+      setSelectedSym(null);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Engine restart (v30): POST /engine/restart records the request;
+  // the engine picks it up on its next control poll (≤1 s), exits,
+  // and Docker relaunches it with the new symbol tradable. The POST
+  // waits (bounded) for the fresh boot to confirm the restart, so the
+  // confirmation below says what actually happened. A failed request
+  // leaves the button in place to retry — nothing was restarted.
+  const requestRestart = async (): Promise<void> => {
+    if (restarting || restartDone || !justAdded) return;
+    setRestarting(true);
+    setRestartError(null);
+    try {
+      const res = await fetch(`${API_BASE}/engine/restart`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ symbol: justAdded }),
+      });
+      const data = (await res.json().catch(() => null)) as {
+        alreadyPending?: boolean;
+        restarted?: boolean;
+        error?: string;
+      } | null;
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setRestartDone(true);
+      setRestartNote(
+        data?.alreadyPending
+          ? "A restart is already requested — the engine will restart shortly."
+          : data?.restarted
+            ? `Engine restarted — all five bots reloaded, positions kept. ${justAdded} is now tradable.`
+            : "Restart requested — the engine is restarting; the new symbol becomes tradable once it is back.",
+      );
+    } catch (err) {
+      setRestartError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRestarting(false);
+    }
+  };
+
   return (
     <div
       ref={rootRef}
       className="inspect-dialog"
       role="dialog"
-      aria-label={`${bot.name} — holdings and today's trades`}
+      aria-label={`${bot.name} — holdings, watch list and today's trades`}
       onMouseEnter={() => controlRef.current?.holdOpen()}
       onMouseLeave={() => controlRef.current?.releaseHold()}
     >
@@ -1706,33 +1953,177 @@ function BuildingInspect({
         </ul>
       )}
 
-      <h4 className="picker-group">Today's trades</h4>
-      {trades.length === 0 ? (
-        <p className="empty">No trades yet today.</p>
-      ) : (
-        <ul className="inspect-list">
-          {trades.map((event, i) => {
-            const verb =
-              event.side === "sell"
-                ? "sold"
-                : event.side === "buy"
-                  ? "bought"
-                  : event.type;
-            return (
-              <li key={`${event.ts}-${event.decision_id ?? ""}-${i}`}>
-                <span className="inspect-item">
-                  {verb} {event.symbol && <>“{event.symbol}”</>} ·{" "}
-                  {fmtTime(event.ts)}
+      <div className="watch-actions">
+        <button
+          type="button"
+          className={`btn small${expanded ? " active" : ""}`}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          Watch List
+        </button>
+        <button
+          type="button"
+          className="btn small"
+          disabled={!candidatesEditable}
+          title={
+            candidatesEditable
+              ? undefined
+              : `${bot.name} trades crypto pairs, not stocks — nothing to add`
+          }
+          onClick={openAddSymbols}
+        >
+          + Add Symbols
+        </button>
+      </div>
+
+      {expanded && (
+        <>
+          <div className="watch-panel">
+            <p className="watch-count">
+              Watch List — {candidates.length} symbols in {bot.name}&apos;s
+              candidate list
+            </p>
+            {candidatesError && (
+              <p className="watch-error">{candidatesError}</p>
+            )}
+            <div className="watch-chips">
+              {candidates.slice(0, 20).map((sym) => (
+                <span
+                  key={sym}
+                  className={`chip${sym === justAdded ? " new" : ""}`}
+                >
+                  {sym}
+                  {sym === justAdded && <span className="tag">NEW</span>}
                 </span>
-                {event.type === "close" && event.pnl !== null && (
-                  <span className={event.pnl >= 0 ? "pnl-pos" : "pnl-neg"}>
-                    {fmtMoney(event.pnl, true)}
+              ))}
+            </div>
+            {candidates.length > 20 && (
+              <p className="watch-more">
+                Showing 20 of {candidates.length} — scroll for more
+              </p>
+            )}
+          </div>
+
+          {candidatesEditable && (
+            <div className="add-panel">
+              <input
+                ref={searchInputRef}
+                className="symbol-search"
+                type="text"
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setSelectedSym(null);
+                }}
+                placeholder="Search symbol or company name…"
+                aria-label="Search symbol or company name"
+                autoComplete="off"
+              />
+              {searching && <p className="watch-note">Searching…</p>}
+              {searchError && (
+                <p className="search-error">{searchError}</p>
+              )}
+              {results.length > 0 && (
+                <ul className="search-results">
+                  {results.map((r) => {
+                    const inList = candidates.includes(r.symbol);
+                    return (
+                      <li
+                        key={r.symbol}
+                        className={`search-result${
+                          selectedSym === r.symbol ? " sel" : ""
+                        }${inList ? " in-list" : ""}`}
+                        aria-disabled={inList}
+                        onClick={() => {
+                          if (!inList) setSelectedSym(r.symbol);
+                        }}
+                      >
+                        <span>
+                          <strong>{r.symbol}</strong>{" "}
+                          <span className="result-name">— {r.name}</span>
+                        </span>
+                        <span className="result-meta">
+                          {inList ? "Already in list" : r.exchange}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              <div className="submit-row">
+                <button
+                  type="button"
+                  className="btn primary small"
+                  disabled={!selectedSym || submitting}
+                  onClick={() => void submitAdd()}
+                >
+                  {submitting ? "Adding…" : "Submit"}
+                </button>
+                {justAdded && (
+                  <span className="added-note">
+                    ✓ {justAdded} added to {bot.name}&apos;s watch list
                   </span>
                 )}
-              </li>
-            );
-          })}
-        </ul>
+                {submitError && (
+                  <span className="search-error">{submitError}</span>
+                )}
+              </div>
+              {submitNote && (
+                <p className="watch-note">
+                  {submitNote}{" "}
+                  {!restartDone && (
+                    <button
+                      type="button"
+                      className="btn small restart-btn"
+                      disabled={restarting}
+                      onClick={() => void requestRestart()}
+                    >
+                      {restarting ? "Restarting…" : "Restart now"}
+                    </button>
+                  )}
+                </p>
+              )}
+              {restartNote && (
+                <p className="watch-note restart-note">{restartNote}</p>
+              )}
+              {restartError && (
+                <p className="search-error">{restartError}</p>
+              )}
+            </div>
+          )}
+
+          <h4 className="picker-group">Today&apos;s trades</h4>
+          {trades.length === 0 ? (
+            <p className="empty">No trades yet today.</p>
+          ) : (
+            <ul className="inspect-list">
+              {trades.map((event, i) => {
+                const verb =
+                  event.side === "sell"
+                    ? "sold"
+                    : event.side === "buy"
+                      ? "bought"
+                      : event.type;
+                return (
+                  <li key={`${event.ts}-${event.decision_id ?? ""}-${i}`}>
+                    <span className="inspect-item">
+                      {verb} {event.symbol && <>“{event.symbol}”</>} ·{" "}
+                      {fmtTime(event.ts)}
+                    </span>
+                    {event.type === "close" && event.pnl !== null && (
+                      <span
+                        className={event.pnl >= 0 ? "pnl-pos" : "pnl-neg"}
+                      >
+                        {fmtMoney(event.pnl, true)}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </>
       )}
     </div>
   );

@@ -33,7 +33,7 @@ import { dirname } from "node:path";
  * persisted) and broadcast to dashboards over the WebSocket.
  */
 
-export type ControlAction = "kill" | "kill-liquidate" | "resume" | "reset";
+export type ControlAction = "kill" | "kill-liquidate" | "resume" | "reset" | "restart";
 export type ControlScope = "bot" | "fleet";
 
 export interface LiquidationClose {
@@ -108,6 +108,30 @@ export interface PendingReset {
   requestedAt: string;
 }
 
+/**
+ * One in-flight engine restart request (v30, Watch List "Restart
+ * now"). Fleet-scope, at most one at a time: the engine observes it on
+ * its control poll and exits cleanly so Docker relaunches it — the
+ * relaunch reloads the bot .md files (newly added candidate symbols
+ * become tradable). Nothing else changes: a restart reloads configs
+ * only — positions, books and halts all live in on-disk state files
+ * and are reconciled on boot, exactly like a mode-switch restart.
+ *
+ * Consumption: the flag is cleared by the FRESH engine process at
+ * boot (restart-consumed, before its first control poll) — NOT by the
+ * exiting process. A fresh boot IS the restart, so any pending
+ * request is satisfied by definition; and clearing before the first
+ * poll is what keeps a rebooted engine from seeing the stale flag
+ * and exiting again in a loop. Persisted, so a request made while
+ * the engine is down is satisfied by its next boot.
+ */
+export interface PendingRestart {
+  id: string;
+  requestedAt: string;
+  /** Free-text context, e.g. the symbol whose add prompted the restart. */
+  detail?: string;
+}
+
 export interface ControlPublicState {
   bots: Record<string, BotControl & { pendingLiquidate: boolean }>;
   anyHalted: boolean;
@@ -116,6 +140,9 @@ export interface ControlPublicState {
   audit: AuditEntry[];
   /** True while a Reset All Data (v22) is still being executed. */
   pendingReset: boolean;
+  /** True while an engine restart (v30) has been requested but the
+   *  fresh engine process has not booted yet to consume it. */
+  pendingRestart: boolean;
 }
 
 /** Full state for the engine (internal endpoint only). */
@@ -124,6 +151,8 @@ export interface ControlInternalState {
   pending: PendingLiquidation[];
   /** The in-flight Reset All Data, or null (v22). */
   pendingReset: PendingReset | null;
+  /** The in-flight engine restart request, or null (v30). */
+  pendingRestart: PendingRestart | null;
 }
 
 interface PersistedState {
@@ -133,6 +162,8 @@ interface PersistedState {
   audit: AuditEntry[];
   /** v22 addition; absent in state files written before v22. */
   pendingReset?: PendingReset | null;
+  /** v30 addition; absent in state files written before v30. */
+  pendingRestart?: PendingRestart | null;
 }
 
 const AUDIT_CAP = 200;
@@ -152,6 +183,7 @@ export class ControlStore {
   private bots: Record<string, BotControl> = {};
   private pending: PendingLiquidation[] = [];
   private pendingReset: PendingReset | null = null;
+  private pendingRestart: PendingRestart | null = null;
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Set<() => void>>();
 
@@ -191,6 +223,20 @@ export class ControlStore {
         parsed.pendingReset && typeof parsed.pendingReset.id === "string"
           ? parsed.pendingReset
           : null;
+      // Pre-v30 state files have no pendingRestart field — tolerate that.
+      this.pendingRestart =
+        parsed.pendingRestart && typeof parsed.pendingRestart.id === "string"
+          ? {
+              id: parsed.pendingRestart.id,
+              requestedAt:
+                typeof parsed.pendingRestart.requestedAt === "string"
+                  ? parsed.pendingRestart.requestedAt
+                  : new Date().toISOString(),
+              ...(typeof parsed.pendingRestart.detail === "string"
+                ? { detail: parsed.pendingRestart.detail }
+                : {}),
+            }
+          : null;
     } catch (err) {
       // A corrupt state file must never wedge the fleet: fall back to
       // all-active and say so loudly. (Halts are safety state; the
@@ -209,6 +255,7 @@ export class ControlStore {
       pending: this.pending,
       audit: this.audit.slice(-AUDIT_CAP),
       pendingReset: this.pendingReset,
+      pendingRestart: this.pendingRestart,
     };
     try {
       mkdirSync(dirname(this.path), { recursive: true });
@@ -240,6 +287,7 @@ export class ControlStore {
       allHalted: this.codenames.length > 0 && haltedCount === this.codenames.length,
       audit: [...this.audit].slice(-AUDIT_PUBLIC).reverse(),
       pendingReset: this.pendingReset !== null,
+      pendingRestart: this.pendingRestart !== null,
     };
   }
 
@@ -250,6 +298,7 @@ export class ControlStore {
       ),
       pending: this.pending.map((p) => ({ ...p })),
       pendingReset: this.pendingReset ? { ...this.pendingReset } : null,
+      pendingRestart: this.pendingRestart ? { ...this.pendingRestart } : null,
     };
   }
 
@@ -283,6 +332,9 @@ export class ControlStore {
     if (!this.hasBot(codename)) return null;
     // Reset is fleet-scope only and goes through applyFleetReset().
     if (action === "reset") return null;
+    // Restart is fleet-scope only and goes through requestRestart() —
+    // it must never reach the kill path below (which would halt the bot).
+    if (action === "restart") return null;
     const now = new Date().toISOString();
 
     if (action === "resume") {
@@ -344,6 +396,9 @@ export class ControlStore {
   ): AuditEntry | null {
     // Reset goes through applyFleetReset() — never the generic path.
     if (action === "reset") return null;
+    // Restart goes through requestRestart() — never the generic path
+    // (a restart must never halt anything).
+    if (action === "restart") return null;
     const now = new Date().toISOString();
 
     if (action === "resume") {
@@ -456,6 +511,84 @@ export class ControlStore {
       for (const wake of waiters) wake();
     }
     return entry;
+  }
+
+  /**
+   * Engine restart (v30), fleet scope. Records the pending restart
+   * the engine observes on its control poll and exits for — Docker
+   * relaunches it, the relaunch reloads the bot .md files, and the
+   * fresh process consumes the flag at boot (see clearRestart).
+   * A restart reloads configs only: it halts nothing, closes no
+   * positions, wipes no state — halts and books survive in their
+   * on-disk files and are reconciled on boot.
+   *
+   * Returns the audit entry, or null when a restart is already
+   * pending (a second request while one is in flight is a no-op and
+   * is not audit-logged again).
+   */
+  requestRestart(source: string, detail?: string): AuditEntry | null {
+    if (this.pendingRestart) return null;
+    const now = new Date().toISOString();
+    this.pendingRestart = {
+      id: newId("restart"),
+      requestedAt: now,
+      ...(detail ? { detail } : {}),
+    };
+    return this.appendAudit({
+      id: newId("audit"),
+      ts: now,
+      scope: "fleet",
+      target: null,
+      action: "restart",
+      source,
+      changed: [...this.codenames],
+    });
+  }
+
+  /**
+   * Consume a pending restart request. Called by the FRESH engine
+   * process at boot, before its first control poll: a fresh boot IS
+   * the restart, so the request is satisfied by definition — and
+   * clearing before the first poll keeps the rebooted engine from
+   * seeing the stale flag and exiting again in a loop. Returns the
+   * cleared request, or null when none was pending. Idempotent.
+   */
+  clearRestart(): PendingRestart | null {
+    if (!this.pendingRestart) return null;
+    const cleared = this.pendingRestart;
+    this.pendingRestart = null;
+    this.save();
+    const waiters = this.waiters.get("restart");
+    if (waiters) {
+      this.waiters.delete("restart");
+      for (const wake of waiters) wake();
+    }
+    return cleared;
+  }
+
+  /**
+   * Resolve true once the pending restart has been consumed by a
+   * fresh engine boot (or when none is pending), or false after
+   * `timeoutMs`. Lets the restart POST answer with the confirmed
+   * restart in the common case, mirroring waitForReset().
+   */
+  async waitForRestart(timeoutMs: number): Promise<boolean> {
+    if (!this.pendingRestart) return true;
+    await new Promise<void>((resolve) => {
+      const set = this.waiters.get("restart") ?? new Set<() => void>();
+      const wake = (): void => {
+        clearTimeout(timer);
+        set.delete(wake);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        set.delete(wake);
+        resolve();
+      }, timeoutMs);
+      set.add(wake);
+      this.waiters.set("restart", set);
+    });
+    return this.pendingRestart === null;
   }
 
   /**

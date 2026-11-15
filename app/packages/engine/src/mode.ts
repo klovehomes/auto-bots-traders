@@ -5,6 +5,7 @@ import {
   type FleetEvent,
   type FleetMode,
 } from "@fleet/shared";
+import type { PendingRestart } from "./control.js";
 
 /**
  * Engine-side fleet mode — the dashboard mode switch (Phase 5).
@@ -159,14 +160,25 @@ export interface ModeSupervisor {
    * once; `undefined` (an older API that doesn't serve it) is ignored.
    */
   observeDesiredMode: (desired: FleetMode | undefined) => void;
+  /**
+   * Feed every internal control-poll result here (v30). A pending
+   * restart request triggers the restart path exactly once — the
+   * process exits cleanly so Docker relaunches it with reloaded bot
+   * configs. `null`/`undefined` (no request, or an older API that
+   * doesn't serve it) is ignored. A restart reloads configs only:
+   * positions, books and halts are reconciled on boot.
+   */
+  observeRestartRequest: (pending: PendingRestart | null | undefined) => void;
   /** Report the running mode now, then on the heartbeat interval. */
   startReporting: () => void;
   stopReporting: () => void;
   readonly switchTriggered: boolean;
+  readonly restartTriggered: boolean;
 }
 
 export function createModeSupervisor(opts: ModeSupervisorOptions): ModeSupervisor {
   let switchTriggered = false;
+  let restartTriggered = false;
   let reportTimer: ReturnType<typeof setInterval> | null = null;
 
   async function reportRunning(attempts: number): Promise<void> {
@@ -196,7 +208,12 @@ export function createModeSupervisor(opts: ModeSupervisorOptions): ModeSuperviso
   }
 
   function observeDesiredMode(desired: FleetMode | undefined): void {
-    if (desired === undefined || desired === opts.runningMode || switchTriggered) {
+    if (
+      desired === undefined ||
+      desired === opts.runningMode ||
+      switchTriggered ||
+      restartTriggered
+    ) {
       return;
     }
     switchTriggered = true;
@@ -233,8 +250,51 @@ export function createModeSupervisor(opts: ModeSupervisorOptions): ModeSuperviso
     })();
   }
 
+  function observeRestartRequest(
+    pending: PendingRestart | null | undefined,
+  ): void {
+    if (!pending || restartTriggered || switchTriggered) {
+      return;
+    }
+    restartTriggered = true;
+    console.log(
+      `[engine] 🔄 restart requested from the dashboard` +
+        (pending.detail ? ` (${pending.detail})` : "") +
+        ` — posting the restart event and exiting so Docker ` +
+        `relaunches the engine with reloaded bot configs`,
+    );
+    const event: FleetEvent = {
+      bot: "Engine",
+      type: "signal",
+      decision_id: null,
+      symbol: null,
+      side: null,
+      qty: null,
+      price: null,
+      pnl: null,
+      reason:
+        `ENGINE RESTART · restart requested from the dashboard` +
+        (pending.detail ? ` (${pending.detail})` : "") +
+        ` — engine restarting to reload bot configs; positions are kept`,
+      ts: new Date().toISOString(),
+    };
+    void (async () => {
+      try {
+        await Promise.race([
+          opts.postEvent(event),
+          sleep(SWITCH_EVENT_TIMEOUT_MS),
+        ]);
+      } catch {
+        // Best effort only — the restart matters, not the receipt.
+      }
+      opts.exit(0);
+    })();
+  }
+
   return {
     observeDesiredMode,
+
+    observeRestartRequest,
 
     startReporting: () => {
       void reportRunning(3);
@@ -256,6 +316,10 @@ export function createModeSupervisor(opts: ModeSupervisorOptions): ModeSuperviso
 
     get switchTriggered() {
       return switchTriggered;
+    },
+
+    get restartTriggered() {
+      return restartTriggered;
     },
   };
 }

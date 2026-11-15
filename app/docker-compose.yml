@@ -39,8 +39,11 @@ services:
       # an empty mount — until TRADERBOT_KEYS_FILE is set in .env.
       KEYS_FILE: /keys/traderbot-keys.txt
     volumes:
-      # Bot definitions live outside the app image; mounted read-only.
-      - ../bots:/bots:ro
+      # Bot definitions live outside the app image. Writable for the
+      # API only (v30): Add Symbols appends one symbol to a bot's
+      # .md file, so the api service needs write access; the engine
+      # keeps its read-only mount below — it only ever reads them.
+      - ../bots:/bots
       - fleet-data:/data
       - ${TRADERBOT_KEYS_FILE:-/dev/null}:/keys/traderbot-keys.txt:ro
     ports:

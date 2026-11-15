@@ -34,6 +34,19 @@ export interface PendingReset {
   requestedAt: string;
 }
 
+/**
+ * An engine restart request in flight (v30), fleet scope. See
+ * api/src/control.ts: the API records it, this client surfaces it on
+ * the poll, and the mode supervisor exits the process so Docker
+ * relaunches it with reloaded bot configs.
+ */
+export interface PendingRestart {
+  id: string;
+  requestedAt: string;
+  /** Free-text context, e.g. the symbol whose add prompted the restart. */
+  detail?: string;
+}
+
 export interface LiquidationClose {
   codename: string;
   symbol: string;
@@ -89,10 +102,16 @@ interface ControlClientOptions {
   /**
    * Called after every successful poll with the raw internal state.
    * Phase 5: carries the fleet's desired mode (dashboard switch) so
-   * the engine can notice a mode change and restart into it. Absent
-   * when the API predates Phase 5 — callers must tolerate undefined.
+   * the engine can notice a mode change and restart into it. v30:
+   * also carries a pending restart request, which the mode
+   * supervisor turns into a clean exit for Docker to relaunch.
+   * Absent when the API predates the field — callers must tolerate
+   * undefined.
    */
-  onControlState?: (state: { desiredMode?: FleetMode }) => void;
+  onControlState?: (state: {
+    desiredMode?: FleetMode;
+    pendingRestart?: PendingRestart | null;
+  }) => void;
 }
 
 export function createControlClient(opts: ControlClientOptions): ControlClient {
@@ -115,6 +134,7 @@ export function createControlClient(opts: ControlClientOptions): ControlClient {
         bots: Record<string, { halted: boolean }>;
         pending: PendingLiquidation[];
         pendingReset?: PendingReset | null;
+        pendingRestart?: PendingRestart | null;
         desiredMode?: FleetMode;
       };
       opts.onControlState?.(state);
@@ -150,6 +170,58 @@ export function createControlClient(opts: ControlClientOptions): ControlClient {
           err instanceof Error ? err.message : err,
         );
       }
+    }
+  }
+
+  /**
+   * Consume any restart request a previous engine process left
+   * behind. A fresh boot IS the restart, so the request is satisfied
+   * by definition — and this MUST run before the first control poll:
+   * if the rebooted process saw the stale flag on its first poll it
+   * would exit again, and the engine would restart in a loop forever.
+   * Best effort with bounded retries; if the API is unreachable the
+   * first poll will fail too, and the next boot (once the API is
+   * back) consumes the flag then.
+   */
+  async function acknowledgeRestart(): Promise<void> {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        const res = await fetch(
+          `${opts.apiBaseUrl}/internal/control/restart-consumed`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-internal-token": opts.token,
+            },
+            body: JSON.stringify({}),
+            signal: AbortSignal.timeout(3000),
+          },
+        );
+        if (res.ok) {
+          const data = (await res.json().catch(() => null)) as {
+            cleared?: unknown;
+          } | null;
+          if (typeof data?.cleared === "string") {
+            console.log(
+              `[engine] control: consumed a pending restart request (${data.cleared}) — this fresh boot satisfies it`,
+            );
+          }
+          return;
+        }
+        console.warn(
+          `[engine] restart-consumed rejected: HTTP ${res.status}`,
+        );
+      } catch (err) {
+        // API may still be coming up; retry below.
+        if (attempt === 5) {
+          console.warn(
+            "[engine] control: could not acknowledge a pending restart at boot — the next poll may re-trigger it:",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500 * attempt));
     }
   }
 
@@ -243,8 +315,14 @@ export function createControlClient(opts: ControlClientOptions): ControlClient {
     },
 
     start: () => {
-      void poll();
-      setInterval(() => void poll(), POLL_MS);
+      // Consume a stale restart flag BEFORE the first poll (see
+      // acknowledgeRestart): otherwise this fresh process would see
+      // the previous process's request and exit again immediately.
+      void (async () => {
+        await acknowledgeRestart();
+        void poll();
+        setInterval(() => void poll(), POLL_MS);
+      })();
     },
   };
 }

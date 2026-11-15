@@ -21,6 +21,18 @@
  *   4. running-mode reporting: the supervisor POSTs its boot mode +
  *      source to /internal/control/mode-report with the internal
  *      token (verified against a real local HTTP stub).
+ *   5. restart detection (v30, createModeSupervisor.observeRestart-
+ *      Request): a pending restart request posts exactly one ENGINE
+ *      RESTART event and calls the injected exit hook exactly once
+ *      with code 0; null/undefined never fire; the restart path
+ *      latches; a mode switch already in flight suppresses a second
+ *      exit and vice versa; a failing postEvent cannot block the exit.
+ *   6. control-client boot ack (v30, createControlClient): start()
+ *      POSTs /internal/control/restart-consumed BEFORE its first
+ *      control poll (a fresh boot consumes the stale flag, so the
+ *      rebooted engine cannot see it and exit again in a loop), and
+ *      the poll passes a pendingRestart through to onControlState
+ *      (verified against a real local HTTP stub).
  *
  * Run: npx tsx harness/mode-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -35,6 +47,7 @@ import {
   readStoredMode,
   resolveBootMode,
 } from "../src/mode.js";
+import { createControlClient } from "../src/control.js";
 import { ModeStore } from "../../api/src/mode.js";
 
 // ---------------------------------------------------------------- setup
@@ -279,6 +292,163 @@ console.log("\n[4] running-mode reporting (real HTTP stub)");
   check("report body: running mode + boot source",
     body.mode === "paper" && body.source === "dashboard switch",
     JSON.stringify(body));
+}
+
+// ------------------------------------------------------- 5. restart detection
+
+console.log("\n[5] restart detection (injected exit hook)");
+{
+  const events: FleetEvent[] = [];
+  const exits: number[] = [];
+  const sup = createModeSupervisor({
+    runningMode: "sim",
+    bootSource: "env",
+    apiBaseUrl: "http://127.0.0.1:1", // reporting not started here
+    token: "test-token",
+    postEvent: async (e) => { events.push(e); },
+    exit: (code) => { exits.push(code); },
+  });
+
+  sup.observeRestartRequest(undefined);
+  sup.observeRestartRequest(null);
+  await sleep(50);
+  check("no restart when the request is absent or null",
+    exits.length === 0 && events.length === 0 && sup.restartTriggered === false);
+
+  sup.observeRestartRequest({
+    id: "restart-1",
+    requestedAt: "2026-11-15T10:00:00.000Z",
+    detail: "AAPL added to a watch list",
+  });
+  await sleep(50);
+  check("pending restart → exactly one exit(0)",
+    exits.length === 1 && exits[0] === 0, JSON.stringify(exits));
+  check("restart event posted: Engine signal naming the restart + detail",
+    events.length === 1 && events[0]!.bot === "Engine" && events[0]!.type === "signal" &&
+      events[0]!.reason.includes("ENGINE RESTART") &&
+      events[0]!.reason.includes("AAPL added to a watch list") &&
+      events[0]!.reason.includes("positions are kept"),
+    JSON.stringify(events[0] ?? null));
+
+  sup.observeRestartRequest({ id: "restart-1", requestedAt: "2026-11-15T10:00:00.000Z" });
+  sup.observeRestartRequest({ id: "restart-2", requestedAt: "2026-11-15T10:01:00.000Z" });
+  await sleep(50);
+  check("the restart path latches: repeat observations (same or new id) never re-fire",
+    exits.length === 1 && events.length === 1);
+
+  // A mode switch already in flight suppresses a second exit…
+  const exits2: number[] = [];
+  const sup2 = createModeSupervisor({
+    runningMode: "sim",
+    bootSource: "env",
+    apiBaseUrl: "http://127.0.0.1:1",
+    token: "test-token",
+    postEvent: async () => {},
+    exit: (code) => { exits2.push(code); },
+  });
+  sup2.observeDesiredMode("paper");
+  await sleep(50);
+  sup2.observeRestartRequest({ id: "restart-9", requestedAt: "2026-11-15T10:02:00.000Z" });
+  await sleep(50);
+  check("switch already triggered → a restart request does not fire a second exit",
+    exits2.length === 1, JSON.stringify(exits2));
+
+  // …and vice versa.
+  const exits3: number[] = [];
+  const sup3 = createModeSupervisor({
+    runningMode: "sim",
+    bootSource: "env",
+    apiBaseUrl: "http://127.0.0.1:1",
+    token: "test-token",
+    postEvent: async () => {},
+    exit: (code) => { exits3.push(code); },
+  });
+  sup3.observeRestartRequest({ id: "restart-9", requestedAt: "2026-11-15T10:02:00.000Z" });
+  await sleep(50);
+  sup3.observeDesiredMode("paper");
+  await sleep(50);
+  check("restart already triggered → a mode switch does not fire a second exit",
+    exits3.length === 1, JSON.stringify(exits3));
+
+  // A failing postEvent must not block the exit.
+  const exits4: number[] = [];
+  const sup4 = createModeSupervisor({
+    runningMode: "paper",
+    bootSource: "dashboard switch",
+    apiBaseUrl: "http://127.0.0.1:1",
+    token: "test-token",
+    postEvent: async () => { throw new Error("API down"); },
+    exit: (code) => { exits4.push(code); },
+  });
+  sup4.observeRestartRequest({ id: "restart-9", requestedAt: "2026-11-15T10:02:00.000Z" });
+  await sleep(50);
+  check("restart fires, and a failed event post cannot block the exit",
+    exits4.length === 1 && exits4[0] === 0, JSON.stringify(exits4));
+}
+
+// ------------------------------------------------------- 6. control-client boot ack
+
+console.log("\n[6] control-client boot ack + restart passthrough (real HTTP stub)");
+{
+  const order: string[] = [];
+  let consumedToken: string | undefined;
+  let consumedBody: string | undefined;
+  const seenStates: { pendingRestart?: { id?: string } | null }[] = [];
+  const server: Server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += String(chunk); });
+    req.on("end", () => {
+      if (req.url === "/internal/control/restart-consumed" && req.method === "POST") {
+        order.push("restart-consumed");
+        consumedToken = req.headers["x-internal-token"] as string;
+        consumedBody = body;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, cleared: "restart-test-1" }));
+        return;
+      }
+      if (req.url === "/internal/control" && req.method === "GET") {
+        order.push("control-poll");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          bots: {},
+          pending: [],
+          pendingReset: null,
+          pendingRestart: {
+            id: "restart-test-1",
+            requestedAt: "2026-11-15T10:00:00.000Z",
+            detail: "AAPL added to a watch list",
+          },
+          desiredMode: "sim",
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+  const client = createControlClient({
+    apiBaseUrl: `http://127.0.0.1:${port}`,
+    token: "test-token",
+    onControlState: (state) => { seenStates.push(state); },
+  });
+  client.start();
+  await sleep(600);
+
+  check("boot ack: restart-consumed POSTed before the first control poll",
+    order[0] === "restart-consumed" && order.includes("control-poll"),
+    JSON.stringify(order));
+  check("boot ack carries the internal token", consumedToken === "test-token");
+  check("boot ack posts an (empty) JSON body", consumedBody === "{}",
+    String(consumedBody));
+  check("poll passes pendingRestart through to onControlState with the request id",
+    seenStates.length > 0 &&
+      seenStates[0]!.pendingRestart?.id === "restart-test-1",
+    JSON.stringify(seenStates[0] ?? null));
+  server.close();
 }
 
 // ------------------------------------------------------- summary
