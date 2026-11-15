@@ -22,7 +22,7 @@ import {
  * She ran the simulator until now. Her bot file (the law) splits her
  * $10,000 book 50/50 under ONE combined risk cap (2.5% daily loss):
  *
- * - CRYPTO SLEEVE (Alpaca PAPER): BTC/USD, ETH/USD, SOL/USD. 20-period
+ * - CRYPTO SLEEVE (Alpaca PAPER): BTC/USD, ETH/USD, SOL/USD, XRP/USD. 20-period
  *   Donchian breakout on hourly bars, confirmed by volume and ATR
  *   expansion; 2× ATR trailing stop; long or flat, never short. Real
  *   paper orders through the Risk Gate, state-only reconcile like the
@@ -67,7 +67,7 @@ const LEGACY_STARTING_CAPITAL = 5000;
 const TICK_MS =
   Number(process.env.POLYCRYPT_TICK_MS ?? process.env.PAPER_TICK_MS ?? 30_000) ||
   30_000;
-const CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD"] as const;
+const CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"] as const;
 const DONCHIAN_PERIOD = 20;
 const ATR_PERIOD = 14;
 const TRAIL_ATR_MULTIPLE = 2;

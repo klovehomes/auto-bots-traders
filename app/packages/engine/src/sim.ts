@@ -82,7 +82,7 @@ const START_PRICES: Record<string, { price: number; kind: PriceKind }> = {
   T: { price: 24.5, kind: "equity" }, VZ: { price: 40, kind: "equity" },
   NU: { price: 15.5, kind: "equity" }, WBD: { price: 10.5, kind: "equity" },
   BTC: { price: 97400, kind: "crypto" }, ETH: { price: 3380, kind: "crypto" },
-  SOL: { price: 208, kind: "crypto" },
+  SOL: { price: 208, kind: "crypto" }, XRP: { price: 2.5, kind: "crypto" },
   "PM:FED": { price: 0.61, kind: "prob" },
   "PM:BTC100K": { price: 0.44, kind: "prob" },
   "PM:SHUTDOWN": { price: 0.32, kind: "prob" },
@@ -350,7 +350,7 @@ export function startSimulator(
       });
     } else {
       const pairs: Array<[string, string]> = [
-        ["BTC/USD", "BTC"], ["ETH/USD", "ETH"], ["SOL/USD", "SOL"],
+        ["BTC/USD", "BTC"], ["ETH/USD", "ETH"], ["SOL/USD", "SOL"], ["XRP/USD", "XRP"],
       ];
       const [label, key] = pairs[Math.floor(rng() * pairs.length)]!;
       const price = series(key).price;

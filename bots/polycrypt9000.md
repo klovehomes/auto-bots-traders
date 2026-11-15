@@ -6,7 +6,7 @@ mode: paper + shadow
 market: polymarket + crypto
 broker: polymarket (shadow first) + alpaca (crypto paper)
 strategy: prediction_mispricing + crypto_breakout
-universe: [Polymarket — liquid binary markets, resolving 24h+ out, clear resolution rules, Crypto — BTC/USD, ETH/USD, SOL/USD]
+universe: [Polymarket — liquid binary markets, resolving 24h+ out, clear resolution rules, Crypto — BTC/USD, ETH/USD, SOL/USD, XRP/USD]
 timeframe: 1Hour
 schedule: 24/7 — Polymarket sleeve scans every 30 minutes, crypto sleeve evaluates hourly
 rules:

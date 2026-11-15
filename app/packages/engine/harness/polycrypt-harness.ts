@@ -341,6 +341,27 @@ function readState(path: string): Record<string, any> {
   check("foreign: no orders placed against it", alpaca.createdOrders.length === 0);
 }
 
+// ------------------------------------------- 8: XRP fourth pair trades
+{
+  const alpaca = new FakeAlpaca();
+  alpaca.cryptoBars.set("BTC/USD", bars(NOW, false));
+  alpaca.cryptoBars.set("ETH/USD", bars(NOW, false, 50));
+  alpaca.cryptoBars.set("SOL/USD", bars(NOW, false, 20));
+  alpaca.cryptoBars.set("XRP/USD", bars(NOW, true, 2.5));
+  alpaca.latestPrices.set("XRP/USD", 7.5); // = last breakout-bar close, as BTC's 105 is
+  const events: FleetEvent[] = [];
+  const statePath = join(dir, "xrp.json");
+  startPolyCryptTrader(polyBot, { alpaca, kalshi: new FakeKalshi() }, async (e) => { events.push(e); }, new FakeControl(), {
+    now: () => NOW, statePath, tickMs: 15,
+  });
+  await until("XRP buy order", () => alpaca.createdOrders.some((o) => o.symbol === "XRP/USD" && o.side === "buy"));
+  const buy = alpaca.createdOrders.find((o) => o.symbol === "XRP/USD")!;
+  check("xrp: market buy, gtc (crypto TIF)", buy.type === "market" && buy.timeInForce === "gtc");
+  check("xrp: sized at 15% of the $10k book", Math.abs(buy.qty - 1500 / 7.5) < 0.01, `qty=${buy.qty}`);
+  await until("XRP position tracked", () => existsSync(statePath) && readState(statePath).crypto?.["XRP/USD"] !== undefined);
+  check("xrp: only XRP ordered (no BTC/ETH/SOL breakout)", !alpaca.createdOrders.some((o) => o.symbol !== "XRP/USD"));
+}
+
 await sleep(50);
 console.log(`\n${passed}/${passed + failed} checks passed`);
 if (failures.length) console.log(`failures: ${failures.join("; ")}`);
