@@ -1988,7 +1988,7 @@ function BuildingInspect({
               <p className="watch-error">{candidatesError}</p>
             )}
             <div className="watch-chips">
-              {candidates.slice(0, 20).map((sym) => (
+              {candidates.map((sym) => (
                 <span
                   key={sym}
                   className={`chip${sym === justAdded ? " new" : ""}`}
@@ -2000,7 +2000,7 @@ function BuildingInspect({
             </div>
             {candidates.length > 20 && (
               <p className="watch-more">
-                Showing 20 of {candidates.length} — scroll for more
+                {candidates.length} symbols — scroll for more
               </p>
             )}
           </div>
