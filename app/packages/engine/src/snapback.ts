@@ -13,7 +13,14 @@ import type {
   AlpacaPosition,
 } from "./alpaca.js";
 import type { PaperControl } from "./paper.js";
-import { rsiWilder, sma, stdDev, type DailyBar } from "./indicators.js";
+import {
+  detectHomingPigeon,
+  rsiWilder,
+  sma,
+  stdDev,
+  type DailyBar,
+  type HomingPigeon,
+} from "./indicators.js";
 import { tradingDaysBetween } from "./vega.js";
 
 /**
@@ -34,6 +41,17 @@ import { tradingDaysBetween } from "./vega.js";
  *   in-progress close, so both legs move intraday as the stretch
  *   changes (the same live-measurement convention Vega uses when he
  *   screens the live price against completed-bar ATR).
+ * - Second entry trigger (Keith, 2026-11-14 — v29): a CONFIRMED
+ *   homing pigeon on completed daily candles — two black candles, the
+ *   second small body inside the long first body, in a downtrend
+ *   (second close below its 10-day average), confirmed by the next
+ *   completed candle closing above the second candle's close
+ *   (detectHomingPigeon in indicators.ts). The trigger is live only
+ *   on the trading day after the confirmation candle completes, then
+ *   expires. It is a third OR leg alongside z-score / RSI(2): the
+ *   200DMA trend filter, the Risk Gate, the sizing and the exits all
+ *   still apply unchanged, and a homing-pigeon entry records the
+ *   entry mean / entry side exactly like a z/RSI entry (Phase 6).
  * - Exits (checked every tick in market hours, in this order): stop
  *   loss at entry × (1 − 5%); the 5-trading-day max hold (the Vega
  *   time-stop convention: Mon–Fri days strictly after the entry date);
@@ -182,6 +200,8 @@ interface Stretch {
   z: number | null;
   rsi2: number | null;
   closes: number;
+  /** Confirmed homing pigeon ending on the latest completed bar, if any. */
+  pigeon: HomingPigeon | null;
 }
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
@@ -357,7 +377,8 @@ export function startSnapbackTrader(
 
   const paramsSnapshot = (): string =>
     `params snapshot: universe ${params.universe.length} symbols, trend filter price > ${TREND_PERIOD}DMA, ` +
-    `entry z < ${Z_ENTRY} on the ${MEAN_PERIOD}-day mean (population SD) or RSI(${RSI_PERIOD}) < ${RSI_ENTRY}, ` +
+    `entry z < ${Z_ENTRY} on the ${MEAN_PERIOD}-day mean (population SD) or RSI(${RSI_PERIOD}) < ${RSI_ENTRY} or a confirmed homing pigeon ` +
+    `(two black daily candles, small body inside the long body, confirmed by the next close above), ` +
     `exits at the ${MEAN_PERIOD}-day mean (only when entered below it) / +${TAKE_PROFIT_PCT}% / stop ${params.stopLossPct}% / 5 trading days max hold, no same-day re-entry after an exit, ` +
     `max_position_pct ${params.maxPositionPct}, min_notional ${money(params.minNotional)}, max_positions ${params.maxPositions}, daily_loss_cap ${params.maxDailyLossPct}%`;
 
@@ -380,6 +401,7 @@ export function startSnapbackTrader(
       sd20: number;
       sma200: number | null;
       closes: number[];
+      pigeon: HomingPigeon | null;
     }
   >();
 
@@ -405,6 +427,10 @@ export function startSnapbackTrader(
         sd20,
         sma200: sma(closes, TREND_PERIOD),
         closes,
+        // Homing pigeon (v29): detected on the completed bars only —
+        // never a half-formed intraday candle — and live only while
+        // the confirmation candle is the latest completed bar.
+        pigeon: detectHomingPigeon(bars),
       };
       barCache.set(symbol, base);
     }
@@ -417,6 +443,7 @@ export function startSnapbackTrader(
       // appended as today's in-progress close (documented choice).
       rsi2: rsiWilder([...base.closes, price], RSI_PERIOD),
       closes: base.closes.length,
+      pigeon: base.pigeon,
     };
   }
 
@@ -769,7 +796,12 @@ export function startSnapbackTrader(
 
       const zFire = stretch.z !== null && stretch.z < Z_ENTRY;
       const rsiFire = stretch.rsi2 !== null && stretch.rsi2 < RSI_ENTRY;
-      if (!zFire && !rsiFire) {
+      // Homing pigeon (v29, Keith 2026-11-14): the third OR leg. It
+      // fires on completed daily candles only — the pattern plus its
+      // confirmation are already in the books before the first hourly
+      // evaluation of the day sees them.
+      const pigeonFire = stretch.pigeon !== null;
+      if (!zFire && !rsiFire && !pigeonFire) {
         noSignal += 1;
         continue;
       }
@@ -788,6 +820,11 @@ export function startSnapbackTrader(
           : null,
         rsiFire
           ? `RSI(${RSI_PERIOD}) ${stretch.rsi2!.toFixed(1)} < ${RSI_ENTRY}`
+          : null,
+        pigeonFire
+          ? `homing pigeon (confirmed): two black daily candles ${stretch.pigeon!.firstDate} (long body) + ${stretch.pigeon!.secondDate} ` +
+            `(small body inside the long body, second close ${money(stretch.pigeon!.secondClose)} below its 10-day average ${money(stretch.pigeon!.sma10AtSecond)}), ` +
+            `confirmed by the ${stretch.pigeon!.confirmDate} close ${money(stretch.pigeon!.confirmClose)} above it`
           : null,
       ]
         .filter((s): s is string => s !== null)

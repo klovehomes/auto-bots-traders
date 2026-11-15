@@ -28,6 +28,10 @@
  *      same-day re-entry cooldown after an exit (next day allowed);
  *      legacy positions without the entry-side fields derive them
  *      at boot and behave accordingly
+ *  14. v29 homing pigeon (second buy trigger): a confirmed pattern
+ *      fires a buy with the pigeon leg alone (z and RSI quiet); an
+ *      unconfirmed pattern does NOT fire; a confirmed pattern below
+ *      the 200DMA is trend-blocked
  *
  * Run: npx tsx harness/snapback-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -130,6 +134,21 @@ function barsFromCloses(closes: number[]): DailyBar[] {
   }));
 }
 
+/** Daily bars with explicit opens/closes (for candle-body patterns), ending Tue 2026-11-03. */
+function barsFromOHLC(candles: { open: number; close: number }[]): DailyBar[] {
+  const dates = weekdayDatesEnding("2026-11-03", candles.length);
+  return candles.map((c, i) => ({
+    date: dates[i]!,
+    open: c.open,
+    high: Math.max(c.open, c.close),
+    low: Math.min(c.open, c.close),
+    close: c.close,
+  }));
+}
+
+const flatCandle = (value: number, n: number): { open: number; close: number }[] =>
+  Array.from({ length: n }, () => ({ open: value, close: value }));
+
 const flat = (value: number, n: number): number[] =>
   Array.from({ length: n }, () => value);
 
@@ -181,6 +200,45 @@ const aboveMeanRsiCloses = [
   ...flat(60, 10),
   ...flat(100, 6),
   99, 97, 94, 92,
+];
+
+/**
+ * Confirmed homing pigeon (S14): base $100 (200DMA ≈ $99.94), then
+ * Fri 2026-10-30 long black $100 → $95, Mon 2026-11-02 small black
+ * $96 → $95.50 (body $0.50 inside the $5 body; second close $95.50
+ * below its 10-day average $99.05), confirmed Tue 2026-11-03 closing
+ * $97. Live $100.50: z ≈ +0.74 (no fire), RSI(2) ≈ 87.5 (no fire) —
+ * the pigeon leg alone must fire the buy, 19 shares.
+ */
+const pigeonCloses = [
+  ...flatCandle(100, 220),
+  { open: 100, close: 95 },
+  { open: 96, close: 95.5 },
+  { open: 95.5, close: 97 },
+];
+/**
+ * Same pattern, unconfirmed (S14): the last candle closes $95.00,
+ * below the second candle's $95.50 — no confirmation, no signal.
+ * Live $100.50 keeps z ≈ +0.71 and RSI(2) ≈ 86.5 quiet, so nothing
+ * else can fire either.
+ */
+const pigeonUnconfirmedCloses = [
+  ...flatCandle(100, 220),
+  { open: 100, close: 95 },
+  { open: 96, close: 95.5 },
+  { open: 96, close: 95 },
+];
+/**
+ * Confirmed pigeon below the trend line (S14): base $80 (200DMA ≈
+ * $79.95), pattern $80 → $76 / $77 → $76.50, confirmed $78. Live $79
+ * sits below the 200DMA (z ≈ −0.45, RSI(2) ≈ 78.9 — both quiet), so
+ * the pigeon fires but the trend filter must block it.
+ */
+const pigeonBelowTrendCloses = [
+  ...flatCandle(80, 220),
+  { open: 80, close: 76 },
+  { open: 77, close: 76.5 },
+  { open: 76.5, close: 78 },
 ];
 
 /** Capture console.log lines (the runners' summaries are console-only). */
@@ -935,6 +993,72 @@ async function main(): Promise<void> {
       !s.events.some((e) => e.type === "close") &&
       !s.broker.createdOrders.some((o) => o.side === "sell") &&
       entriesOf(s.statePath).SPY?.qty === 10);
+  }
+
+  console.log("— S14: v29 homing pigeon — second buy trigger —");
+  {
+    // Confirmed pattern, z and RSI both quiet: the pigeon leg alone
+    // must fire the buy (19 shares @ $100.50), naming the trigger.
+    const s = boot({
+      setup: (b) => {
+        b.dailyBars.set("SPY", barsFromOHLC(pigeonCloses));
+        b.latestPrices.set("SPY", 100.5);
+      },
+    });
+    await until("pigeon entry order", () => s.broker.createdOrders.length === 1);
+    const order = s.broker.createdOrders[0]!;
+    check("pigeon: confirmed pattern fires a market day BUY for SPY, qty floor($2,000 / $100.50) = 19",
+      order.symbol === "SPY" && order.side === "buy" && order.qty === 19,
+      JSON.stringify(order));
+    const approval = s.events.find(
+      (e) => e.type === "signal" && e.symbol === "SPY");
+    check("pigeon: decision names the homing pigeon leg and the Risk Gate approval",
+      !!approval && approval.reason.includes("homing pigeon (confirmed)") &&
+      approval.reason.includes("Risk Gate: APPROVED") &&
+      approval.reason.includes("200DMA"),
+      approval?.reason);
+    check("pigeon: the decision names ONLY the pigeon leg (no z-score leg, stretch starts with the pigeon)",
+      !!approval && !approval.reason.includes("z-score") &&
+      approval.reason.includes("stretch: homing pigeon (confirmed)"),
+      approval?.reason);
+    await until("pigeon fill tracked", () =>
+      s.events.some((e) => e.type === "open" && e.symbol === "SPY"));
+    check("pigeon: fill becomes an open event at $100.50 × 19",
+      s.events.some((e) => e.type === "open" && e.symbol === "SPY" &&
+        e.price === 100.5 && e.qty === 19));
+  }
+  {
+    // Unconfirmed pattern: same two black candles, but the last
+    // candle closes below the second candle's close — no signal.
+    const s = boot({
+      setup: (b) => {
+        b.dailyBars.set("SPY", barsFromOHLC(pigeonUnconfirmedCloses));
+        b.latestPrices.set("SPY", 100.5);
+      },
+    });
+    await sleep(400);
+    check("pigeon unconfirmed: no orders and no decision events",
+      s.broker.createdOrders.length === 0 && s.events.length === 0,
+      `orders=${s.broker.createdOrders.length} events=${s.events.length}`);
+  }
+  {
+    // Confirmed pattern below the 200DMA: the pigeon fires but the
+    // trend filter blocks it — BLOCKED decision, no order.
+    const s = boot({
+      setup: (b) => {
+        b.dailyBars.set("SPY", barsFromOHLC(pigeonBelowTrendCloses));
+        b.latestPrices.set("SPY", 79);
+      },
+    });
+    await until("pigeon trend-block decision", () =>
+      s.events.some((e) => e.reason.includes("Trend filter: BLOCKED")));
+    const blocked = s.events.find((e) =>
+      e.reason.includes("Trend filter: BLOCKED"));
+    check("pigeon below 200DMA: trend filter BLOCKS the confirmed pattern, no order",
+      s.broker.createdOrders.length === 0 &&
+      !s.events.some((e) => e.type === "open") &&
+      !!blocked && blocked.reason.includes("homing pigeon"),
+      blocked?.reason);
   }
 
   console.log(
