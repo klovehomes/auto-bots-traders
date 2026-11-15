@@ -1988,7 +1988,9 @@ function BuildingInspect({
               <p className="watch-error">{candidatesError}</p>
             )}
             <div className="watch-chips">
-              {candidates.map((sym) => (
+              {[...candidates]
+                .sort((a, b) => a.localeCompare(b))
+                .map((sym) => (
                 <span
                   key={sym}
                   className={`chip${sym === justAdded ? " new" : ""}`}
