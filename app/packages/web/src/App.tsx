@@ -1532,7 +1532,7 @@ interface CandidatesResponse {
  * the dialog's first paint, before the server refresh on expand.
  * Mirrors the API's rule (api/src/candidates.ts): Trendia/Snapback
  * read `universe`, Vega/Wesley read `candidate_pool` (falling back to
- * `watchlist_examples`), PolyCrypt9000 shows her three crypto pairs
+ * `watchlist_examples`), PolyCrypt9000 shows her four crypto pairs
  * and is not editable — she trades no stocks.
  */
 function candidateListFromBot(bot: BotConfig): {
@@ -1540,7 +1540,7 @@ function candidateListFromBot(bot: BotConfig): {
   editable: boolean;
 } {
   if (bot.codename === "polycrypt9000") {
-    return { symbols: ["BTC/USD", "ETH/USD", "SOL/USD"], editable: false };
+    return { symbols: ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"], editable: false };
   }
   if (Array.isArray(bot.universe)) {
     return {

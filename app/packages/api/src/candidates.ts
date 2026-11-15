@@ -21,7 +21,7 @@ import type { BotConfig } from "@fleet/shared/types";
  */
 
 /** PolyCrypt9000's crypto pairs — mirrors polycrypt.ts `CRYPTO_PAIRS`. */
-export const POLYCRYPT_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD"] as const;
+export const POLYCRYPT_CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"] as const;
 
 export type CandidateField = "universe" | "candidate_pool" | "watchlist_examples" | "crypto_pairs";
 
