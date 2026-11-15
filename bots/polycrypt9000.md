@@ -36,7 +36,7 @@ probability for an event, compares it to the crowd's price, and only acts
 on an 8-point disagreement or better — small, quarter-Kelly, and in shadow
 mode until its calibration is proven on paper, because Polymarket offers
 no testnet to practice on. The crypto sleeve is a breakout machine:
-BTC, ETH, and SOL on hourly bars, entering only when price breaks the
+BTC, ETH, SOL, and XRP on hourly bars, entering only when price breaks the
 20-period channel with volume and volatility expanding behind it, riding
 a 2x ATR trailing stop, never short.
 

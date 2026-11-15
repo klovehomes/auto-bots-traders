@@ -115,7 +115,7 @@ export function GateScreen(props: {
         <h1 className="gate-title">Prediction Markets Assistant</h1>
         <p className="gate-tagline">
           Polymarket-only trader — Polymarket shadow sleeve + BTC / ETH /
-          SOL breakout sleeve
+          SOL / XRP breakout sleeve
         </p>
 
         {step === "email" && (

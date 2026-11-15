@@ -50,7 +50,7 @@ import { fmtMoney, fmtTime, type BotStats } from "./fleetState.js";
  */
 
 const SLEEVES: { key: keyof SleeveToggles; label: string; hint: string }[] = [
-  { key: "crypto", label: "Crypto", hint: "BTC / ETH / SOL breakout sleeve" },
+  { key: "crypto", label: "Crypto", hint: "BTC / ETH / SOL / XRP breakout sleeve" },
   { key: "kalshi", label: "Kalshi", hint: "Kalshi prediction-markets sleeve" },
   { key: "polymarket", label: "Polymarket", hint: "Polymarket shadow sleeve" },
 ];

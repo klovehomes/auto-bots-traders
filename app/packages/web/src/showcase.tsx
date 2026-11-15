@@ -343,7 +343,7 @@ export function ShowcaseApp() {
           <h1>Prediction Markets Assistant</h1>
           <p className="subtitle">
             Polymarket-only trader — Polymarket shadow sleeve + BTC / ETH /
-            SOL breakout sleeve. Watch PolyCrypt9000 trade on paper,
+            SOL / XRP breakout sleeve. Watch PolyCrypt9000 trade on paper,
             live-ish and in public.
           </p>
         </div>

@@ -816,7 +816,7 @@ function Dashboard() {
           <h1>Prediction Markets Assistant</h1>
           <p className="build-version">Build {BUILD_VERSION}</p>
           <p className="subtitle">
-            Polymarket-only trader — Polymarket shadow sleeve + BTC / ETH / SOL breakout sleeve.
+            Polymarket-only trader — Polymarket shadow sleeve + BTC / ETH / SOL / XRP breakout sleeve.
           </p>
         </div>
         <div className="header-badges">
