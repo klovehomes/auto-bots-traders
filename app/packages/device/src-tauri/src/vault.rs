@@ -26,6 +26,8 @@ const PASSPHRASE_ACCOUNT: &str = "__vault_passphrase__";
 const INDEX_FILE: &str = "vault-index.json";
 const MIN_PASSPHRASE_LEN: usize = 10;
 pub const SESSION_LENGTH: Duration = Duration::from_secs(15 * 60);
+/// Longest a bot (trading) session may run before the user must unlock again.
+pub const MAX_BOT_SESSION_HOURS: u64 = 24;
 const MAX_FAILED_UNLOCKS: u32 = 5;
 const LOCKOUT: Duration = Duration::from_secs(30);
 
@@ -74,6 +76,8 @@ pub struct VaultStatus {
     pub initialized: bool,
     pub unlocked: bool,
     pub seconds_left: u64,
+    /// Seconds left in the bot (trading) session; 0 when bots may not trade.
+    pub bot_session_seconds_left: u64,
 }
 
 /// Decrypted secret fields. Every value is wiped from memory on drop.
@@ -96,8 +100,17 @@ impl Drop for SecretFields {
 pub struct Vault {
     data_dir: PathBuf,
     unlocked_until: Option<Instant>,
+    /// Bots may use keys until this instant even after the UI auto-locks.
+    bot_session_until: Option<Instant>,
     failed_unlocks: u32,
     locked_out_until: Option<Instant>,
+}
+
+pub fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 pub fn now_secs() -> u64 {
@@ -142,6 +155,7 @@ impl Vault {
         Self {
             data_dir,
             unlocked_until: None,
+            bot_session_until: None,
             failed_unlocks: 0,
             locked_out_until: None,
         }
@@ -191,7 +205,32 @@ impl Vault {
             initialized: self.is_initialized(),
             unlocked: self.is_unlocked(),
             seconds_left,
+            bot_session_seconds_left: self
+                .bot_session_until
+                .and_then(|t| t.checked_duration_since(Instant::now()))
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
         }
+    }
+
+    /// Start (or extend) a bot session. Requires the vault to be unlocked now.
+    pub fn arm_bots(&mut self, hours: u64) -> Result<(), String> {
+        self.require_unlocked()?;
+        if hours == 0 || hours > MAX_BOT_SESSION_HOURS {
+            return Err(format!("Bot session must be 1–{MAX_BOT_SESSION_HOURS} hours"));
+        }
+        self.bot_session_until = Some(Instant::now() + Duration::from_secs(hours * 3600));
+        Ok(())
+    }
+
+    /// End the bot session: bots lose key access immediately.
+    pub fn disarm_bots(&mut self) {
+        self.bot_session_until = None;
+    }
+
+    /// Keys may be used when the UI is unlocked or a bot session is running.
+    pub fn can_trade(&self) -> bool {
+        self.is_unlocked() || matches!(self.bot_session_until, Some(t) if Instant::now() < t)
     }
 
     pub fn require_unlocked(&self) -> Result<(), String> {
@@ -349,7 +388,9 @@ impl Vault {
 
     /// Secret fields for one credential. Only the Rust side ever calls this.
     pub fn secrets(&self, id: &str) -> Result<SecretFields, String> {
-        self.require_unlocked()?;
+        if !self.can_trade() {
+            return Err("Vault is locked and no bot session is running".into());
+        }
         let raw = Zeroizing::new(
             entry(&cred_account(id))?
                 .get_password()

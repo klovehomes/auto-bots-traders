@@ -30,15 +30,21 @@ function addDays(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Nasdaq public earnings calendar, one request per date. */
-export function createNasdaqEarningsCalendar(): EarningsCalendarLike {
+/**
+ * Nasdaq public earnings calendar, one request per date. `fetchFn` lets a
+ * device route the call through its native side (a WebView can't call the
+ * Nasdaq API directly because of cross-origin rules).
+ */
+export function createNasdaqEarningsCalendar(
+  fetchFn: typeof fetch = (...args) => fetch(...args),
+): EarningsCalendarLike {
   return {
     async getEarningsWindow(fromDate, days) {
       const out = new Map<string, string>();
       for (let i = 0; i <= days; i++) {
         const date = addDays(fromDate, i);
         try {
-          const res = await fetch(
+          const res = await fetchFn(
             `https://api.nasdaq.com/api/calendar/earnings?date=${date}`,
             {
               headers: {

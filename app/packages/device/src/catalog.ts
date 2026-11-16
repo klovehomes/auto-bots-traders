@@ -1,3 +1,4 @@
+import type { BotConfig } from "@fleet/shared/types";
 import raw from "./catalog.generated.json";
 import type { Provider, StrategySelection } from "./api";
 
@@ -23,9 +24,28 @@ export interface StrategyDef {
   requires: Provider[];
   optional: Provider[];
   summary: string;
+  /** The full bot config the core runners take, straight from bots/<name>.md. */
+  bot: BotConfig;
 }
 
-export const CATALOG = raw as StrategyDef[];
+export const CATALOG = raw as unknown as StrategyDef[];
+
+/**
+ * The bot config a runner is started with: the .md file's config with the
+ * user's symbol list and (tightened-only) risk limits applied.
+ */
+export function botForSelection(def: StrategyDef, sel: StrategySelection): BotConfig {
+  const bot: BotConfig = { ...def.bot, risk: { ...def.bot.risk }, rules: { ...def.bot.rules } };
+  if (sel.universe.length > 0) {
+    if (Array.isArray(def.bot.universe)) bot.universe = [...sel.universe];
+    else if (def.bot.candidate_pool) bot.candidate_pool = [...sel.universe];
+  }
+  const pos = clampToCap(sel.maxPositionPct, def.caps.maxPositionPct);
+  const loss = clampToCap(sel.maxDailyLossPct, def.caps.maxDailyLossPct);
+  if (pos !== null) bot.risk.max_position_pct = pos;
+  if (loss !== null) bot.risk.max_daily_loss_pct = loss;
+  return bot;
+}
 
 export function defaultSelection(def: StrategyDef): StrategySelection {
   return {

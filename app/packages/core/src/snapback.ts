@@ -187,7 +187,7 @@ export function startSnapbackTrader(
   post: (event: FleetEvent) => Promise<void>,
   control: PaperControl,
   deps: SnapbackDeps,
-): void {
+): () => void {
   const now = deps.now ?? (() => new Date());
 
   const params: SnapbackParams = {
@@ -1085,5 +1085,7 @@ export function startSnapbackTrader(
       `book ${money(bookEquity())}, hourly stretch evaluation in market hours, exits on the fast tick`,
   );
   void tick();
-  setInterval(() => void tick(), tickMs);
+  const timer = setInterval(() => void tick(), tickMs);
+  // Stop handle: devices start and stop bots without restarting the process.
+  return () => clearInterval(timer);
 }

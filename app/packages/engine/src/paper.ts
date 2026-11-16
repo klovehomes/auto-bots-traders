@@ -17,8 +17,8 @@ export function startPaperTrader(
   post: Parameters<typeof startCore>[2],
   control: Parameters<typeof startCore>[3],
   deps: PaperDepsNode = {},
-): void {
-  startCore(bot, client, post, control, {
+): () => void {
+  return startCore(bot, client, post, control, {
     ...deps,
     store: deps.store ?? fileStateStore,
     statePath: deps.statePath ?? process.env.PAPER_STATE_PATH,

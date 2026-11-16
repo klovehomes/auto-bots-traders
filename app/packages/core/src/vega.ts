@@ -368,7 +368,7 @@ export function startVegaTrader(
   post: (event: FleetEvent) => Promise<void>,
   control: PaperControl,
   deps: VegaDeps,
-): void {
+): () => void {
   const now = deps.now ?? (() => new Date());
   const earnings = deps.earnings ?? createNasdaqEarningsCalendar();
   const shadow =
@@ -1580,5 +1580,7 @@ export function startVegaTrader(
         : "; entries limit-at-mid with one reprice"),
   );
   void tick();
-  setInterval(() => void tick(), tickMs);
+  const timer = setInterval(() => void tick(), tickMs);
+  // Stop handle: devices start and stop bots without restarting the process.
+  return () => clearInterval(timer);
 }

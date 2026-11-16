@@ -75,3 +75,12 @@ button.link { background: none; border: none; padding: 0; color: var(--accent); 
 .rules { margin: 0; display: grid; gap: 6px; font-size: 0.82rem; }
 .rules dt { color: var(--muted); text-transform: capitalize; }
 .rules dd { margin: 0; }
+
+/* Bots activity feed */
+.feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 0.82rem; }
+.feed li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 6px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.feed .tag { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.feed .reason { flex-basis: 100%; color: var(--muted); overflow-wrap: anywhere; }
+.feed-open { border-left: 3px solid var(--accent) !important; }
+.feed-close { border-left: 3px solid var(--ok) !important; }
+.feed-halt { border-left: 3px solid var(--warn) !important; }

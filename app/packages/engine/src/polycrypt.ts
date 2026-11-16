@@ -17,8 +17,8 @@ export function startPolyCryptTrader(
   post: Parameters<typeof startCore>[2],
   control: Parameters<typeof startCore>[3],
   deps: PolyCryptDepsNode = {},
-): void {
-  startCore(bot, client, post, control, {
+): () => void {
+  return startCore(bot, client, post, control, {
     ...deps,
     store: deps.store ?? fileStateStore,
     statePath: deps.statePath ?? process.env.POLYCRYPT_STATE_PATH,

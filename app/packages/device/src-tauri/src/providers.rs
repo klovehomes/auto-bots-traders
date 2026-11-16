@@ -190,3 +190,193 @@ mod tests {
         assert!(is_eth_address(&format!("0x{}", "b".repeat(40))));
     }
 }
+
+// ───────────────────────────── Broker proxy ─────────────────────────────
+//
+// The device's bots call exchanges through here. JavaScript names the
+// credential, the endpoint and the payload; Rust picks the host from the
+// credential's environment, attaches auth, and refuses anything outside a
+// short allowlist. A compromised WebView therefore can't use the keys on
+// other hosts or endpoints (transfers, account settings, live trading).
+
+pub const ALPACA_DATA_BASE_URL: &str = "https://data.alpaca.markets";
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Venue {
+    Alpaca,
+    Kalshi,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AlpacaApi {
+    Trading,
+    Data,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerRequest {
+    pub credential_id: String,
+    pub venue: Venue,
+    /// Alpaca only.
+    pub api: Option<AlpacaApi>,
+    pub method: String,
+    pub path: String,
+    pub query: Option<BTreeMap<String, String>>,
+    pub body: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RawResponse {
+    pub status: u16,
+    pub text: String,
+}
+
+fn path_is_clean(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains("..")
+        && !path.contains("//")
+        && !path.contains('?')
+        && !path.contains('#')
+        && path.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// Endpoint allowlist: exactly what the strategies use, nothing more.
+pub fn broker_allowed(venue: Venue, api: Option<AlpacaApi>, method: &str, path: &str) -> bool {
+    if !path_is_clean(path) {
+        return false;
+    }
+    let under = |prefix: &str| path.starts_with(prefix) && path.len() > prefix.len();
+    match (venue, api, method) {
+        (Venue::Alpaca, Some(AlpacaApi::Trading), "GET") => {
+            matches!(path, "/v2/account" | "/v2/clock" | "/v2/positions" | "/v2/orders" | "/v2/options/contracts")
+                || under("/v2/orders/")
+        }
+        (Venue::Alpaca, Some(AlpacaApi::Trading), "POST") => path == "/v2/orders",
+        (Venue::Alpaca, Some(AlpacaApi::Trading), "DELETE") => under("/v2/orders/") || under("/v2/positions/"),
+        (Venue::Alpaca, Some(AlpacaApi::Data), "GET") => {
+            under("/v2/stocks/") || path == "/v1beta1/options/snapshots" || under("/v1beta3/crypto/us/")
+        }
+        (Venue::Kalshi, None, "GET") => {
+            path == "/trade-api/v2/portfolio/balance"
+                || path == "/trade-api/v2/markets"
+                || under("/trade-api/v2/markets/")
+                || under("/trade-api/v2/portfolio/orders/")
+        }
+        (Venue::Kalshi, None, "POST") => path == "/trade-api/v2/portfolio/orders",
+        (Venue::Kalshi, None, "DELETE") => under("/trade-api/v2/portfolio/orders/"),
+        _ => false,
+    }
+}
+
+pub async fn broker_send(
+    client: &reqwest::Client,
+    provider: Provider,
+    env: Env,
+    req: BrokerRequest,
+    secrets: SecretFields,
+) -> Result<RawResponse, String> {
+    if env == Env::Live {
+        return Err("Live trading is locked in this build — use paper/demo keys".into());
+    }
+    let expected = match req.venue {
+        Venue::Alpaca => Provider::Alpaca,
+        Venue::Kalshi => Provider::Kalshi,
+    };
+    if provider != expected {
+        return Err("That key belongs to a different exchange".into());
+    }
+    let method = req.method.to_uppercase();
+    if !broker_allowed(req.venue, req.api, &method, &req.path) {
+        return Err(format!("Endpoint not allowed: {method} {}", req.path));
+    }
+    let http_method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+
+    let base = match (req.venue, req.api) {
+        (Venue::Alpaca, Some(AlpacaApi::Trading)) => ALPACA_PAPER_BASE_URL,
+        (Venue::Alpaca, _) => ALPACA_DATA_BASE_URL,
+        (Venue::Kalshi, _) => KALSHI_DEMO_BASE_URL,
+    };
+    let mut builder = client.request(http_method, format!("{base}{}", req.path));
+    if let Some(q) = &req.query {
+        builder = builder.query(q);
+    }
+    if let Some(b) = &req.body {
+        builder = builder.json(b);
+    }
+    builder = match req.venue {
+        Venue::Alpaca => builder
+            .header("APCA-API-KEY-ID", secrets.get("key_id").unwrap_or_default())
+            .header("APCA-API-SECRET-KEY", secrets.get("secret_key").unwrap_or_default()),
+        Venue::Kalshi => {
+            let ts = crate::vault::now_millis().to_string();
+            let sig = sign_kalshi_request(secrets.get("private_key_pem").unwrap_or_default(), &ts, &method, &req.path)?;
+            builder
+                .header("KALSHI-ACCESS-KEY", secrets.get("key_id").unwrap_or_default())
+                .header("KALSHI-ACCESS-TIMESTAMP", ts)
+                .header("KALSHI-ACCESS-SIGNATURE", sig)
+        }
+    };
+    drop(secrets);
+    let res = builder.send().await.map_err(|e| format!("network error: {e}"))?;
+    let status = res.status().as_u16();
+    let text = res.text().await.unwrap_or_default();
+    Ok(RawResponse { status, text })
+}
+
+/// Unauthenticated GET for public data the strategies need (no keys involved).
+pub async fn public_get(client: &reqwest::Client, url: &str) -> Result<RawResponse, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "Bad URL".to_string())?;
+    let allowed = parsed.scheme() == "https"
+        && parsed.host_str() == Some("api.nasdaq.com")
+        && parsed.path() == "/api/calendar/earnings";
+    if !allowed {
+        return Err("Host not allowed".into());
+    }
+    let res = client
+        .get(parsed)
+        // The public endpoint rejects non-browser agents (same as engine/src/earnings.ts).
+        .header(
+            "user-agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        )
+        .header("accept", "application/json, text/plain, */*")
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+    let status = res.status().as_u16();
+    let text = res.text().await.unwrap_or_default();
+    Ok(RawResponse { status, text })
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_permits_strategy_endpoints() {
+        let t = Some(AlpacaApi::Trading);
+        let d = Some(AlpacaApi::Data);
+        assert!(broker_allowed(Venue::Alpaca, t, "GET", "/v2/account"));
+        assert!(broker_allowed(Venue::Alpaca, t, "POST", "/v2/orders"));
+        assert!(broker_allowed(Venue::Alpaca, t, "DELETE", "/v2/positions/BTC%2FUSD"));
+        assert!(broker_allowed(Venue::Alpaca, d, "GET", "/v2/stocks/AAPL/bars"));
+        assert!(broker_allowed(Venue::Alpaca, d, "GET", "/v1beta3/crypto/us/latest/trades"));
+        assert!(broker_allowed(Venue::Kalshi, None, "POST", "/trade-api/v2/portfolio/orders"));
+    }
+
+    #[test]
+    fn allowlist_blocks_everything_else() {
+        let t = Some(AlpacaApi::Trading);
+        assert!(!broker_allowed(Venue::Alpaca, t, "PATCH", "/v2/account/configurations"));
+        assert!(!broker_allowed(Venue::Alpaca, t, "GET", "/v2/account/activities"));
+        assert!(!broker_allowed(Venue::Alpaca, t, "DELETE", "/v2/positions/"));
+        assert!(!broker_allowed(Venue::Alpaca, t, "GET", "/v2/orders/../account"));
+        assert!(!broker_allowed(Venue::Alpaca, t, "GET", "/v2/orders?x=1"));
+        assert!(!broker_allowed(Venue::Alpaca, Some(AlpacaApi::Data), "POST", "/v2/stocks/AAPL/bars"));
+        assert!(!broker_allowed(Venue::Kalshi, None, "GET", "/trade-api/v2/portfolio/settlements"));
+        assert!(!broker_allowed(Venue::Kalshi, Some(AlpacaApi::Trading), "GET", "/trade-api/v2/markets"));
+    }
+}

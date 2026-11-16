@@ -254,7 +254,7 @@ export function startPolyCryptTrader(
   post: (event: FleetEvent) => Promise<void>,
   control: PaperControl,
   deps: PolyCryptDeps,
-): void {
+): () => void {
   const now = deps.now ?? (() => new Date());
   const { alpaca, kalshi } = clients;
   const statePath =
@@ -1220,5 +1220,7 @@ export function startPolyCryptTrader(
       `book ${money(bookEquity())} (crypto ${money(sleeveEquity("crypto"))} / prediction ${money(sleeveEquity("kalshi"))})`,
   );
   void tick();
-  setInterval(() => void tick(), tickMs);
+  const timer = setInterval(() => void tick(), tickMs);
+  // Stop handle: devices start and stop bots without restarting the process.
+  return () => clearInterval(timer);
 }

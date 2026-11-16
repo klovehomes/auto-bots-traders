@@ -159,7 +159,7 @@ export function startPaperTrader(
   post: (event: FleetEvent) => Promise<void>,
   control: PaperControl,
   deps: PaperDeps,
-): void {
+): () => void {
   const params: TrendiaParams = {
     maxPositionPct: numericOr(bot.risk.max_position_pct, 20),
     maxPositions: numericOr(bot.risk.max_positions, 5),
@@ -696,7 +696,9 @@ export function startPaperTrader(
       `book ${money(bookEquity())}, evaluating daily bars, entries at next open`,
   );
   void tick();
-  setInterval(() => void tick(), tickMs);
+  const timer = setInterval(() => void tick(), tickMs);
+  // Stop handle: devices start and stop bots without restarting the process.
+  return () => clearInterval(timer);
 }
 
 /**

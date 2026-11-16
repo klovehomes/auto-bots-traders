@@ -249,7 +249,7 @@ export function startWesleyTrader(
   post: (event: FleetEvent) => Promise<void>,
   control: PaperControl,
   deps: WesleyDeps,
-): void {
+): () => void {
   const now = deps.now ?? (() => new Date());
   const params: WesleyParams = {
     universe: (bot.watchlist_examples ?? []).filter(
@@ -1234,5 +1234,7 @@ export function startWesleyTrader(
       `daily evaluation in market hours, early-exit ${EARLY_EXIT_FRACTION * 100}% / defense ${DEFENSE_MULTIPLE}× on the fast tick`,
   );
   void tick();
-  setInterval(() => void tick(), tickMs);
+  const timer = setInterval(() => void tick(), tickMs);
+  // Stop handle: devices start and stop bots without restarting the process.
+  return () => clearInterval(timer);
 }

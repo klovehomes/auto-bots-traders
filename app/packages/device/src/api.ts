@@ -12,7 +12,35 @@ export interface VaultStatus {
   initialized: boolean;
   unlocked: boolean;
   secondsLeft: number;
+  /** Seconds left in the bot (trading) session; 0 = bots can't use keys. */
+  botSessionSecondsLeft: number;
 }
+
+export interface RawResponse {
+  status: number;
+  text: string;
+}
+
+export interface BrokerRequest {
+  credentialId: string;
+  venue: "alpaca" | "kalshi";
+  api?: "trading" | "data";
+  method: string;
+  path: string;
+  query?: Record<string, string>;
+  body?: unknown;
+}
+
+/** Calls the Rust side makes for the bots. Keys are attached in Rust, never here. */
+export const native = {
+  armBots: (hours: number) => invoke<VaultStatus>("bots_arm", { hours }),
+  disarmBots: () => invoke<VaultStatus>("bots_disarm"),
+  broker: (request: BrokerRequest) => invoke<RawResponse>("broker_request", { request }),
+  publicGet: (url: string) => invoke<RawResponse>("public_get", { url }),
+  stateLoadAll: () => invoke<Record<string, string>>("bot_state_load_all"),
+  stateWrite: (key: string, text: string) => invoke<void>("bot_state_write", { key, text }),
+  stateRemove: (key: string) => invoke<void>("bot_state_remove", { key }),
+};
 
 export interface CredentialMeta {
   id: string;

@@ -18,6 +18,8 @@ export * from "./control.js";
 export * from "./sim.js";
 export * from "./earnings.js";
 export * from "./kalshi.js";
+export * from "./alpaca-rest.js";
+export * from "./local-control.js";
 export * from "./paper.js";
 export * from "./snapback.js";
 export * from "./vega.js";

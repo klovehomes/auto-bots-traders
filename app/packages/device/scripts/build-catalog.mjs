@@ -80,6 +80,27 @@ const catalog = files
       requires: KEY_OVERRIDES[data.codename]?.requires ?? requires,
       optional: KEY_OVERRIDES[data.codename]?.optional ?? [],
       summary: firstParagraph(content),
+      // The full config the core runners take (same shape as shared/src/loader.ts).
+      bot: {
+        name: data.name,
+        codename: data.codename,
+        enabled: data.enabled,
+        mode: data.mode,
+        market: data.market,
+        broker: data.broker,
+        strategy: data.strategy,
+        viz: data.viz,
+        universe: data.universe,
+        watchlist_examples: Array.isArray(data.watchlist_examples) ? data.watchlist_examples.map(String) : undefined,
+        candidate_pool: Array.isArray(data.candidate_pool) ? data.candidate_pool.map(String) : undefined,
+        timeframe: typeof data.timeframe === "string" ? data.timeframe : undefined,
+        schedule: typeof data.schedule === "string" ? data.schedule : undefined,
+        rules: data.rules ?? {},
+        risk: data.risk ?? {},
+        philosophy: content.trim(),
+        sourcePath: `bots/${file}`,
+        raw: data,
+      },
     };
   })
   .filter((s) => s.codename && s.requires.length > 0)

@@ -146,6 +146,17 @@ function toOrder(raw: Record<string, unknown>): KalshiOrder {
   };
 }
 
+/** One authenticated Kalshi API call. `path` includes the /trade-api/v2 prefix. */
+export interface KalshiRequest {
+  method: string;
+  path: string;
+  query?: Record<string, string>;
+  body?: unknown;
+}
+
+/** Sends a request with Kalshi auth attached; returns status + raw body text. */
+export type KalshiTransport = (req: KalshiRequest) => Promise<{ status: number; text: string }>;
+
 /**
  * Build a Kalshi client for one API key id. `signer` produces the request
  * signature, so this module never sees the private key.
@@ -159,13 +170,7 @@ export function createKalshiClientWithSigner(
   const now = options.now ?? (() => new Date());
   const fetchFn = options.fetchFn ?? fetch;
 
-  async function request<T>(
-    method: string,
-    pathSuffix: string,
-    query?: Record<string, string>,
-    body?: unknown,
-  ): Promise<T> {
-    const path = `${KALSHI_API_PREFIX}${pathSuffix}`;
+  return createKalshiClientWithTransport(async ({ method, path, query, body }) => {
     const url = new URL(`${baseUrl}${path}`);
     if (query) {
       for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
@@ -182,19 +187,37 @@ export function createKalshiClientWithSigner(
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    if (!res.ok) {
-      let excerpt = "";
-      try {
-        excerpt = (await res.text()).replace(/\s+/g, " ").trim().slice(0, 300);
-      } catch {
-        // status alone will have to do
-      }
+    let text = "";
+    try {
+      text = await res.text();
+    } catch {
+      // status alone will have to do
+    }
+    return { status: res.status, text };
+  });
+}
+
+/**
+ * Build a Kalshi client over any transport. A device passes one that asks
+ * its Rust vault to sign and send, so the private key never enters JS.
+ */
+export function createKalshiClientWithTransport(transport: KalshiTransport): KalshiClientLike {
+  async function request<T>(
+    method: string,
+    pathSuffix: string,
+    query?: Record<string, string>,
+    body?: unknown,
+  ): Promise<T> {
+    const path = `${KALSHI_API_PREFIX}${pathSuffix}`;
+    const res = await transport({ method, path, query, body });
+    if (res.status < 200 || res.status >= 300) {
+      const excerpt = res.text.replace(/\s+/g, " ").trim().slice(0, 300);
       throw new Error(
         `kalshi ${method} ${path}: HTTP ${res.status}${excerpt ? ` — ${excerpt}` : ""}`,
       );
     }
-    if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
+    if (res.status === 204 || res.text.trim() === "") return undefined as T;
+    return JSON.parse(res.text) as T;
   }
 
   return {
