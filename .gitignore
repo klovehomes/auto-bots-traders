@@ -41,3 +41,6 @@ next-env.d.ts
 keys.txt
 traderbot-keys.txt
 *.keys.txt
+
+# Cloudflare wrangler cache (contains account id/email)
+.wrangler/
