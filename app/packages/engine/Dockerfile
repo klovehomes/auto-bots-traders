@@ -5,6 +5,8 @@ WORKDIR /app
 # npm ci at the root installs every workspace from the single lockfile.
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json ./packages/shared/package.json
+COPY packages/core/package.json ./packages/core/package.json
+COPY packages/device/package.json ./packages/device/package.json
 COPY packages/engine/package.json ./packages/engine/package.json
 COPY packages/api/package.json ./packages/api/package.json
 COPY packages/web/package.json ./packages/web/package.json

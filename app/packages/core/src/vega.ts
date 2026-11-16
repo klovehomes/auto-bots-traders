@@ -1,0 +1,1584 @@
+import type { BotConfig, FleetEvent } from "@fleet/shared/types";
+import type { StateStore } from "./state.js";
+import type {
+  AlpacaClientLike,
+  AlpacaOrder,
+  OptionContract,
+  OptionSnapshot,
+} from "./broker.js";
+import type { PaperControl } from "./paper.js";
+import {
+  createNasdaqEarningsCalendar,
+  type EarningsCalendarLike,
+} from "./earnings.js";
+import {
+  atrMean,
+  priorHighTimed,
+  priorLowTimed,
+  type DailyBar,
+  type TimedBar,
+} from "./indicators.js";
+
+/**
+ * PHASE 3 — Vega on the Alpaca PAPER account with real options data.
+ *
+ * Scope: PHASE3-VEGA-SCOPE.md (decisions §6, all made by Keith
+ * 2026-11-03). Vega's `.md` rules, translated literally:
+ *
+ * - Hourly during market hours he screens a 30-symbol candidate pool:
+ *   price at or above the $5 floor with NO ceiling (Keith, 2026-11-03:
+ *   the limit belongs on the price of the option, not the stock),
+ *   20-day ATR ≥ 3.5% of price (the IV-percentile leg of his OR-screen
+ *   activates once ~60 days of self-recorded IV history exist — daily
+ *   IV is recorded in state from day one).
+ * - Signal (D2): an hourly close beyond the prior 20-hour high (long
+ *   calls) or low (long puts).
+ * - Earnings guard (D4): no new entries within 5 days of earnings, from
+ *   the Nasdaq calendar, refreshed once per ET date. FAIL-CLOSED: when
+ *   the calendar is unavailable, entries pause and the pause is logged
+ *   as a decision — never a silent pass.
+ * - Contract pick (Keith, 2026-11-03, replaces the 0.35–0.55 delta
+ *   band): nearest listed expiry 2–4 weeks out; the strike is the
+ *   nearest listed strike at-or-beyond 5% out of the money (calls
+ *   spot × 1.05, puts spot × 0.95). Open interest ≥ 1,000 and bid/ask
+ *   spread ≤ 10% of mid are checked on that one strike only — if it
+ *   fails, the name is rejected for the cycle (no walking the chain).
+ *   Delta is recorded in the decision record, informational only.
+ * - Premium cap, enforced at pick time: exactly 1 contract per
+ *   position, and that contract at mid (mid × 100) must cost ≤ 6% of
+ *   his virtual book — $600 on the $10,000 starting book (Keith,
+ *   2026-11-03). A pick over the cap is a logged rejection, once.
+ * - Risk Gate: max 6 positions, 3% daily loss cap, book-commitment
+ *   check — all against the same book equity the premium cap used.
+ * - Orders (D5): limit at mid, one reprice after 60 s at the fresh mid,
+ *   then cancel and log. Exits use close-at-market (stops must fill),
+ *   triggered off live mids on the 30 s tick: +50% take profit, −35%
+ *   stop, 5-trading-day time stop, and a hard force-exit 2 trading
+ *   days before expiry.
+ * - SHADOW MODE (D6): with VEGA_SHADOW=true (the delivered default)
+ *   the full pipeline runs — screen, picks, gate verdicts — and emits
+ *   decision / order-intent events labelled SHADOW, tracking a shadow
+ *   book for exits, but places NO broker orders. VEGA_SHADOW=false is
+ *   the only step to live paper orders. Shadow and live books and
+ *   realized PnL are kept strictly separate in state.
+ * - Kill switch: halts cancel his open option orders; kill+liquidate
+ *   closes his tracked contracts and reports honestly. In shadow mode
+ *   liquidation settles the shadow book at current mids.
+ *
+ * Milestone 3 (shares ballast / 75-25 mix) is intentionally NOT here
+ * (D3): he runs options-only until the mix lands.
+ *
+ * PHASE 6 AMENDMENT (2026-11-04): a chain-fetch or snapshot-fetch
+ * failure is no longer a silent console warning. On 2026-11-04 his
+ * SMCI and RBLX signals died on "chain fetch failed: HTTP 404" with
+ * no decision record at all — invisible in the Decisions tab. Fetch
+ * failures now emit a NO TRADE decision carrying the error detail
+ * (the Alpaca client includes the response body excerpt), and the
+ * hourly summary accounts for every signal exactly once: entries
+ * submitted / gate-rejected / no-trade / fetch-failed /
+ * earnings-blocked sum to the signal count.
+ */
+
+/**
+ * Declared starting capital for Vega's virtual books (Keith, 2026-11-03:
+ * fleet-wide doubling, $5,000 → $10,000). Persisted per book in state
+ * (startCapital / shadowStartCapital); see the boot re-seed below.
+ */
+const STARTING_CAPITAL = 10000;
+/** The only starting capital before 2026-11-03 — reads pre-doubling state files. */
+const LEGACY_STARTING_CAPITAL = 5000;
+/** Tick cadence; overridable for tests (VEGA_TICK_MS). */
+const TICK_MS = 30_000;
+
+// Contract-selection constants, from the prose of vega.md (rules.contracts
+// / rules.options_liquidity) — the .md carries them as text. The strike
+// sits OTM_TARGET_PCT out of the money (Keith, 2026-11-03); there is no
+// delta band anymore.
+const OTM_TARGET_PCT = 5;
+const EXPIRY_MIN_DAYS = 14;
+const EXPIRY_MAX_DAYS = 28;
+const OI_MIN = 1000;
+const SPREAD_MAX_PCT = 10;
+const ATR_PERIOD = 20;
+const ATR_MIN_PCT = 3.5;
+const EARNINGS_GUARD_DAYS = 5;
+const EARNINGS_LOOKAHEAD_DAYS = 7;
+const REPRICE_AFTER_MS = 60_000;
+const DAILY_BARS_LOOKBACK_DAYS = 90;
+const HOURLY_BARS_LOOKBACK_DAYS = 12;
+
+export interface VegaDeps {
+  /** Where this runner persists its state: a file on the VM, app storage on a device. */
+  store: StateStore;
+  earnings?: EarningsCalendarLike;
+  now?: () => Date;
+  statePath?: string;
+  tickMs?: number;
+  shadow?: boolean;
+}
+
+interface TrackedContract {
+  underlying: string;
+  optionType: "call" | "put";
+  qty: number;
+  /** Premium paid per contract (per share; ×100×qty = dollars). */
+  entryPremium: number;
+  /** ET date (YYYY-MM-DD) the position was opened/adopted. */
+  entryDate: string;
+  expiry: string;
+  decisionId: string;
+}
+
+interface PendingVegaEntry {
+  orderId: string;
+  contractSymbol: string;
+  underlying: string;
+  optionType: "call" | "put";
+  qty: number;
+  limitPrice: number;
+  decisionId: string;
+  submittedAtMs: number;
+  repriced: boolean;
+}
+
+interface PendingVegaExit {
+  orderId: string;
+  contractSymbol: string;
+  qty: number;
+  entryPremium: number;
+  decisionId: string;
+  trigger: string;
+}
+
+interface EarningsState {
+  /** ET date the current map was fetched for. */
+  fetchedFor: string | null;
+  available: boolean;
+  bySymbol: Record<string, string>;
+  lastAttemptKey: string | null;
+}
+
+interface VegaState {
+  /** Declared starting capital each book was seeded with (re-seed rule). */
+  startCapital: number;
+  shadowStartCapital: number;
+  realizedTotal: number;
+  realizedByDay: Record<string, number>;
+  shadowRealizedTotal: number;
+  shadowRealizedByDay: Record<string, number>;
+  contracts: Record<string, TrackedContract>;
+  shadowContracts: Record<string, TrackedContract>;
+  pendingEntries: PendingVegaEntry[];
+  pendingExits: PendingVegaExit[];
+  lastEvalHour: string | null;
+  earnings: EarningsState;
+  ivByUnderlying: Record<string, Record<string, number>>;
+  decisionCounter: number;
+}
+
+interface VegaParams {
+  pool: string[];
+  /** Underlying price floor — there is deliberately no ceiling (Keith, 2026-11-03). */
+  priceMin: number;
+  maxPositionPct: number;
+  maxPositions: number;
+  stopLossPct: number;
+  takeProfitPct: number;
+  timeStopDays: number;
+  maxDailyLossPct: number;
+}
+
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+const money = (n: number): string =>
+  `$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Bot .md risk fields carry prose ("6 (premium paid...)") — take the number. */
+function leadingNumber(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const m = value.match(/\d+(?:\.\d+)?/);
+    if (m) return Number(m[0]);
+  }
+  return fallback;
+}
+
+function etDate(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+  }).format(d);
+}
+
+function etMinutes(d: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const m = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  return h * 60 + m;
+}
+
+function etHourKey(d: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const h = parts.find((p) => p.type === "hour")?.value ?? "00";
+  return `${etDate(d)}T${h}`;
+}
+
+/** YYYY-MM-DD plus `days` calendar days (UTC math on the date string). */
+export function addDays(dateStr: string, days: number): string {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Weekdays (Mon–Fri, exchange holidays ignored) strictly after
+ * `fromStr`, up to and including `toStr`. Negative when to < from.
+ */
+export function tradingDaysBetween(fromStr: string, toStr: string): number {
+  if (fromStr === toStr) return 0;
+  const sign = fromStr < toStr ? 1 : -1;
+  const [lo, hi] = sign === 1 ? [fromStr, toStr] : [toStr, fromStr];
+  let count = 0;
+  let cur = lo;
+  while (cur < hi) {
+    cur = addDays(cur, 1);
+    const dow = new Date(`${cur}T12:00:00Z`).getUTCDay();
+    if (dow >= 1 && dow <= 5) count += 1;
+  }
+  return sign * count;
+}
+
+const OCC_RE = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])\d{8}$/;
+
+/** Parse an OCC option symbol into underlying / expiry / type. */
+export function parseOccSymbol(
+  symbol: string,
+): { underlying: string; expiry: string; optionType: "call" | "put" } | null {
+  const m = OCC_RE.exec(symbol);
+  if (!m) return null;
+  return {
+    underlying: m[1]!,
+    expiry: `20${m[2]}-${m[3]}-${m[4]}`,
+    optionType: m[5] === "C" ? "call" : "put",
+  };
+}
+
+export interface ChainCandidate {
+  contract: OptionContract;
+  snapshot: OptionSnapshot;
+}
+
+export type PickResult =
+  | { ok: true; candidate: ChainCandidate; targetStrike: number }
+  | { ok: false; reason: string };
+
+function liquidityFailure(c: ChainCandidate): string | null {
+  const { contract, snapshot } = c;
+  if (contract.openInterest < OI_MIN) {
+    return `open interest ${contract.openInterest.toLocaleString("en-US")} < ${OI_MIN.toLocaleString("en-US")} on ${contract.symbol}`;
+  }
+  if (snapshot.mid === null || snapshot.bid <= 0 || snapshot.ask <= 0) {
+    return `no two-sided quote on ${contract.symbol}`;
+  }
+  const spreadPct = ((snapshot.ask - snapshot.bid) / snapshot.mid) * 100;
+  // "Within 10% of mid" is inclusive — the epsilon keeps an exactly-10%
+  // spread from failing on floating-point dust (e.g. 2.10 − 1.90).
+  if (spreadPct > SPREAD_MAX_PCT + 1e-9) {
+    return `bid/ask spread ${spreadPct.toFixed(1)}% of mid exceeds ${SPREAD_MAX_PCT}% on ${contract.symbol} (bid ${snapshot.bid.toFixed(2)} / ask ${snapshot.ask.toFixed(2)})`;
+  }
+  return null;
+}
+
+/**
+ * The contract pick, pure for harness testing (Keith, 2026-11-03):
+ * expiry selection unchanged — the nearest listed expiry inside the
+ * 2–4 week window — then the strike nearest at-or-beyond
+ * OTM_TARGET_PCT out of the money (calls: smallest strike ≥ spot ×
+ * 1.05; puts: largest strike ≤ spot × 0.95). The liquidity gates apply
+ * to that one strike only: if it fails, the pick fails — the chain is
+ * never walked looking for a cheaper or more liquid strike. Delta
+ * plays no part in the choice; it is recorded for the decision text.
+ */
+export function pickContract(
+  candidates: ChainCandidate[],
+  today: string,
+  direction: "call" | "put",
+  spot: number,
+): PickResult {
+  const gte = addDays(today, EXPIRY_MIN_DAYS);
+  const lte = addDays(today, EXPIRY_MAX_DAYS);
+  const inWindow = candidates.filter(
+    (c) =>
+      c.contract.type === direction &&
+      c.contract.expiry >= gte &&
+      c.contract.expiry <= lte,
+  );
+  if (inWindow.length === 0) {
+    return {
+      ok: false,
+      reason: `no contracts inside the 2–4 week expiry window (${gte} → ${lte})`,
+    };
+  }
+  const chosenExpiry = inWindow
+    .map((c) => c.contract.expiry)
+    .sort()[0]!;
+  const targetStrike =
+    direction === "call"
+      ? spot * (1 + OTM_TARGET_PCT / 100)
+      : spot * (1 - OTM_TARGET_PCT / 100);
+  const beyond = inWindow.filter(
+    (c) =>
+      c.contract.expiry === chosenExpiry &&
+      (direction === "call"
+        ? c.contract.strike >= targetStrike - 1e-9
+        : c.contract.strike <= targetStrike + 1e-9),
+  );
+  if (beyond.length === 0) {
+    return {
+      ok: false,
+      reason:
+        `no ${direction} strike at-or-beyond the ${OTM_TARGET_PCT}% out-of-the-money ` +
+        `target ${money(targetStrike)} (spot ${money(spot)}) at the ${chosenExpiry} expiry`,
+    };
+  }
+  const picked = beyond.reduce((a, b) =>
+    direction === "call"
+      ? b.contract.strike < a.contract.strike
+        ? b
+        : a
+      : b.contract.strike > a.contract.strike
+        ? b
+        : a,
+  );
+  const fail = liquidityFailure(picked);
+  if (fail !== null) return { ok: false, reason: fail };
+  return { ok: true, candidate: picked, targetStrike };
+}
+
+export function startVegaTrader(
+  bot: BotConfig,
+  client: AlpacaClientLike,
+  post: (event: FleetEvent) => Promise<void>,
+  control: PaperControl,
+  deps: VegaDeps,
+): void {
+  const now = deps.now ?? (() => new Date());
+  const earnings = deps.earnings ?? createNasdaqEarningsCalendar();
+  const shadow =
+    deps.shadow ?? true;
+  const tag = shadow ? "SHADOW" : "PAPER";
+
+  const params: VegaParams = {
+    pool: (bot.candidate_pool ?? bot.watchlist_examples ?? []).filter(
+      (v): v is string => typeof v === "string",
+    ),
+    priceMin: leadingNumber(bot.rules.underlying_price_min, 5),
+    maxPositionPct: leadingNumber(bot.risk.max_position_pct, 6),
+    maxPositions: leadingNumber(bot.risk.max_positions, 6),
+    stopLossPct: leadingNumber(bot.risk.stop_loss_pct, 35),
+    takeProfitPct: leadingNumber(bot.risk.take_profit_pct, 50),
+    timeStopDays: leadingNumber(bot.risk.time_stop, 5),
+    maxDailyLossPct: leadingNumber(bot.risk.max_daily_loss_pct, 3),
+  };
+  const statePath =
+    deps.statePath ??
+    "data/paper-vega-state.json";
+  const store = deps.store;
+  const tickMs = deps.tickMs ?? TICK_MS;
+
+  const freshState = (): VegaState => ({
+    startCapital: STARTING_CAPITAL,
+    shadowStartCapital: STARTING_CAPITAL,
+    realizedTotal: 0,
+    realizedByDay: {},
+    shadowRealizedTotal: 0,
+    shadowRealizedByDay: {},
+    contracts: {},
+    shadowContracts: {},
+    pendingEntries: [],
+    pendingExits: [],
+    lastEvalHour: null,
+    earnings: {
+      fetchedFor: null,
+      available: false,
+      bySymbol: {},
+      lastAttemptKey: null,
+    },
+    ivByUnderlying: {},
+    decisionCounter: 0,
+  });
+
+  let state: VegaState = freshState();
+  let persistedText: string | null = null;
+  let persistedRaw: Partial<VegaState> | null = null;
+  try {
+    if ((persistedText = store.read(statePath)) !== null) {
+      persistedRaw = JSON.parse(persistedText) as VegaState;
+      state = { ...freshState(), ...persistedRaw };
+      // State files written before the startCapital fields existed were
+      // seeded at the legacy $5,000 — say so explicitly, or the merge
+      // above would silently dress an old book in the new capital.
+      if (typeof persistedRaw.startCapital !== "number") {
+        state.startCapital = LEGACY_STARTING_CAPITAL;
+      }
+      if (typeof persistedRaw.shadowStartCapital !== "number") {
+        state.shadowStartCapital = LEGACY_STARTING_CAPITAL;
+      }
+      console.log(`[vega] ${bot.name}: restored state from ${statePath}`);
+    }
+  } catch (err) {
+    console.warn(
+      `[vega] ${bot.name}: state file unreadable, starting fresh:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  const save = (): void => {
+    try {
+      store.write(statePath, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn(
+        `[vega] ${bot.name}: state save failed:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  };
+
+  // ---- Boot re-seed (Keith, 2026-11-03) --------------------------------
+  // If the declared starting capital changed since a book was seeded,
+  // an UNTOUCHED book (no realized PnL, no open contracts, no pending
+  // exits — realized totals all zero means equity sat exactly at the
+  // old start) re-seeds to the new capital and logs it. A touched book
+  // keeps its original start and logs the skip: doubling a book that
+  // already has a track record would rewrite its percentages. Pending
+  // unfilled entry orders do not block a re-seed and are left alone.
+  // Each book (live / shadow) is judged on its own ledger.
+  if (persistedRaw !== null) {
+    const allZero = (byDay: Record<string, number>): boolean =>
+      Object.values(byDay).every((v) => v === 0);
+    let dirty = false;
+    const reseed = (
+      label: string,
+      persisted: number,
+      apply: (v: number) => void,
+      untouched: boolean,
+      touchedWhy: string,
+    ): void => {
+      if (persisted === STARTING_CAPITAL) return;
+      dirty = true;
+      if (untouched) {
+        apply(STARTING_CAPITAL);
+        console.log(
+          `[vega] ${bot.name}: ${label} re-seeded ${money(persisted)} → ${money(STARTING_CAPITAL)} (starting capital changed; book was untouched)`,
+        );
+      } else {
+        console.log(
+          `[vega] ${bot.name}: starting capital changed ${money(persisted)} → ${money(STARTING_CAPITAL)} but the ${label} is not untouched (${touchedWhy}) — resize skipped, book keeps its ${money(persisted)} start`,
+        );
+      }
+    };
+    reseed(
+      "book",
+      state.startCapital,
+      (v) => {
+        state.startCapital = v;
+      },
+      state.realizedTotal === 0 &&
+        allZero(state.realizedByDay) &&
+        Object.keys(state.contracts).length === 0 &&
+        state.pendingExits.length === 0,
+      `realized ${money(state.realizedTotal)}, ${Object.keys(state.contracts).length} open contract(s), ${state.pendingExits.length} pending exit(s)`,
+    );
+    reseed(
+      "shadow book",
+      state.shadowStartCapital,
+      (v) => {
+        state.shadowStartCapital = v;
+      },
+      state.shadowRealizedTotal === 0 &&
+        allZero(state.shadowRealizedByDay) &&
+        Object.keys(state.shadowContracts).length === 0,
+      `realized ${money(state.shadowRealizedTotal)}, ${Object.keys(state.shadowContracts).length} open shadow contract(s)`,
+    );
+    if (dirty) save();
+  }
+
+  const book = (): Record<string, TrackedContract> =>
+    shadow ? state.shadowContracts : state.contracts;
+  /** The starting capital of the ACTIVE mode's book (premium/loss caps base). */
+  const startCapital = (): number =>
+    shadow ? state.shadowStartCapital : state.startCapital;
+  const bookEquity = (): number =>
+    startCapital() +
+    (shadow ? state.shadowRealizedTotal : state.realizedTotal);
+  const realizedToday = (): number =>
+    (shadow ? state.shadowRealizedByDay : state.realizedByDay)[etDate(now())] ??
+    0;
+  const addRealized = (pnl: number): void => {
+    const day = etDate(now());
+    if (shadow) {
+      state.shadowRealizedTotal = round2(state.shadowRealizedTotal + pnl);
+      state.shadowRealizedByDay[day] = round2(
+        (state.shadowRealizedByDay[day] ?? 0) + pnl,
+      );
+    } else {
+      state.realizedTotal = round2(state.realizedTotal + pnl);
+      state.realizedByDay[day] = round2(
+        (state.realizedByDay[day] ?? 0) + pnl,
+      );
+    }
+  };
+
+  const emit = (
+    partial: Omit<FleetEvent, "bot" | "decision_id" | "ts">,
+    decisionId?: string,
+  ): string => {
+    let id = decisionId;
+    if (!id) {
+      state.decisionCounter += 1;
+      id = `${bot.codename}-${state.decisionCounter}`;
+    }
+    const event: FleetEvent = {
+      ...partial,
+      bot: bot.name,
+      decision_id: id,
+      ts: now().toISOString(),
+    };
+    console.log(
+      `[vega] ${event.bot} ${event.type} ${event.symbol ?? ""} ${event.side ?? ""} ` +
+        `qty=${event.qty ?? "-"} @ ${event.price ?? "-"} ` +
+        `${event.pnl !== null ? `pnl=${event.pnl.toFixed(2)} ` : ""}— ${event.reason}`,
+    );
+    void post(event);
+    return id;
+  };
+
+  const paramsSnapshot = (): string =>
+    `params snapshot: pool ${params.pool.length} symbols, price floor ${money(params.priceMin)} with no price ceiling, ` +
+    `ATR(${ATR_PERIOD}) ≥ ${ATR_MIN_PCT}% of price, strike ${OTM_TARGET_PCT}% out of the money (nearest listed at-or-beyond), exactly 1 contract per position, expiry ${EXPIRY_MIN_DAYS}–${EXPIRY_MAX_DAYS} days, ` +
+    `OI ≥ ${OI_MIN.toLocaleString("en-US")}, spread ≤ ${SPREAD_MAX_PCT}% of mid, premium cap ${params.maxPositionPct}% of book, ` +
+    `max_positions ${params.maxPositions}, stop ${params.stopLossPct}%, take_profit ${params.takeProfitPct}%, ` +
+    `time_stop ${params.timeStopDays} trading days, daily_loss_cap ${params.maxDailyLossPct}%, earnings guard ${EARNINGS_GUARD_DAYS} days`;
+
+  let haltCancelHandled = false;
+  let booted = false;
+  /** The last Reset All Data id this runner applied (v22 idempotency). */
+  let lastResetId: string | null = null;
+  let tickBusy = false;
+
+  const isHers = (symbol: string): boolean => {
+    const occ = parseOccSymbol(symbol);
+    return occ !== null && params.pool.includes(occ.underlying);
+  };
+
+  /** Daily bars whose session is complete (drop today's before 16:05 ET). */
+  function completedDailyBars(bars: DailyBar[]): DailyBar[] {
+    const today = etDate(now());
+    const afterClose = etMinutes(now()) >= 16 * 60 + 5;
+    return bars.filter(
+      (b) => b.date < today || (b.date === today && afterClose),
+    );
+  }
+
+  /** Hourly bars whose hour has fully elapsed. */
+  function completedHourlyBars(bars: TimedBar[]): TimedBar[] {
+    const t = now().getTime();
+    return bars.filter(
+      (b) => new Date(b.timestamp).getTime() + 3_600_000 <= t,
+    );
+  }
+
+  /** Refresh the earnings map once per ET date (hourly retry on failure). */
+  async function refreshEarningsIfStale(): Promise<void> {
+    const today = etDate(now());
+    if (state.earnings.fetchedFor === today && state.earnings.available) {
+      return;
+    }
+    const attemptKey = etHourKey(now());
+    if (state.earnings.lastAttemptKey === attemptKey) return;
+    state.earnings.lastAttemptKey = attemptKey;
+    const map = await earnings.getEarningsWindow(
+      today,
+      EARNINGS_LOOKAHEAD_DAYS,
+    );
+    if (map) {
+      state.earnings = {
+        fetchedFor: today,
+        available: true,
+        bySymbol: Object.fromEntries(map),
+        lastAttemptKey: attemptKey,
+      };
+      console.log(
+        `[vega] ${bot.name}: earnings calendar refreshed — ${map.size} reporters in the next ${EARNINGS_LOOKAHEAD_DAYS} days`,
+      );
+    } else {
+      // Fail-closed: an unreadable calendar blocks new entries (§5).
+      state.earnings.available = false;
+      state.earnings.bySymbol = {};
+      console.warn(
+        `[vega] ${bot.name}: earnings calendar UNAVAILABLE — new entries are blocked until it reads again (fail-closed)`,
+      );
+    }
+    save();
+  }
+
+  /** Earnings date inside the guard window for `symbol`, or null. */
+  function earningsBlock(symbol: string): string | null {
+    const date = state.earnings.bySymbol[symbol];
+    if (!date) return null;
+    const today = etDate(now());
+    if (date >= today && date <= addDays(today, EARNINGS_GUARD_DAYS)) {
+      return date;
+    }
+    return null;
+  }
+
+  /** Record one IV observation per underlying per ET date (§5). */
+  function recordIv(
+    underlying: string,
+    candidates: ChainCandidate[],
+    targetStrike: number,
+  ): void {
+    const today = etDate(now());
+    const days = (state.ivByUnderlying[underlying] ??= {});
+    if (days[today] !== undefined) return;
+    // The observation comes from the contract nearest the 5% OTM target
+    // strike — the strike he would actually trade (the delta-band
+    // nearest-to-0.45 choice is gone with the band).
+    const withIv = candidates
+      .filter((c) => c.snapshot.iv !== null)
+      .sort(
+        (a, b) =>
+          Math.abs(a.contract.strike - targetStrike) -
+          Math.abs(b.contract.strike - targetStrike),
+      );
+    const iv = withIv[0]?.snapshot.iv;
+    if (iv === null || iv === undefined) return;
+    days[today] = iv;
+    // Bound the history (~a year of trading days is plenty).
+    const keys = Object.keys(days).sort();
+    while (keys.length > 260) {
+      const oldest = keys.shift()!;
+      delete days[oldest];
+    }
+  }
+
+  /** Cancel Vega's open broker orders (his own OCC symbols / tracked ids). */
+  async function cancelOpenOrders(): Promise<void> {
+    if (shadow) return;
+    const trackedIds = new Set([
+      ...state.pendingEntries.map((p) => p.orderId),
+      ...state.pendingExits.map((p) => p.orderId),
+    ]);
+    const open = await client.getOpenOrders();
+    for (const o of open) {
+      if (trackedIds.has(o.id) || isHers(o.symbol)) {
+        await client.cancelOrder(o.id);
+        console.log(
+          `[vega] ${bot.name}: cancelled open order ${o.id} (${o.symbol})`,
+        );
+      }
+    }
+  }
+
+  /** Poll pending entry/exit orders; turn fills into stream events. */
+  async function pollPending(): Promise<void> {
+    for (const p of [...state.pendingEntries]) {
+      let order: AlpacaOrder;
+      try {
+        order = await client.getOrder(p.orderId);
+      } catch {
+        continue;
+      }
+      const terminal = ["canceled", "cancelled", "expired", "rejected"].includes(
+        order.status,
+      );
+      if (
+        order.filledQty > 0 &&
+        order.filledAvgPrice !== null &&
+        (order.status === "filled" || terminal)
+      ) {
+        const occ = parseOccSymbol(p.contractSymbol);
+        state.contracts[p.contractSymbol] = {
+          underlying: p.underlying,
+          optionType: p.optionType,
+          qty: order.filledQty,
+          entryPremium: order.filledAvgPrice,
+          entryDate: etDate(now()),
+          expiry: occ?.expiry ?? "",
+          decisionId: p.decisionId,
+        };
+        state.pendingEntries = state.pendingEntries.filter(
+          (x) => x.orderId !== p.orderId,
+        );
+        emit(
+          {
+            type: "open",
+            symbol: p.contractSymbol,
+            side: "buy",
+            qty: order.filledQty,
+            price: round2(order.filledAvgPrice),
+            pnl: null,
+            reason:
+              `PAPER · entry filled @ ${money(order.filledAvgPrice)}/contract — ${p.qty} contract(s) of ${p.contractSymbol} ` +
+              `(${p.underlying} ${p.optionType}) opened`,
+          },
+          p.decisionId,
+        );
+        save();
+        continue;
+      }
+      if (terminal) {
+        state.pendingEntries = state.pendingEntries.filter(
+          (x) => x.orderId !== p.orderId,
+        );
+        emit(
+          {
+            type: "signal",
+            symbol: p.contractSymbol,
+            side: "buy",
+            qty: p.qty,
+            price: null,
+            pnl: null,
+            reason: `PAPER · entry order ${order.status} before filling — no position taken (decision #${p.decisionId})`,
+          },
+          p.decisionId,
+        );
+        save();
+        continue;
+      }
+      // D5: one reprice at the fresh mid after 60 s, then cancel + log.
+      if (now().getTime() - p.submittedAtMs >= REPRICE_AFTER_MS) {
+        if (!p.repriced) {
+          await client.cancelOrder(p.orderId);
+          // The cancel can race a fill — re-read before resubmitting.
+          const after = await client.getOrder(p.orderId).catch(() => null);
+          if (after && after.filledQty > 0 && after.filledAvgPrice !== null) {
+            continue; // next tick's poll records the fill on the old id
+          }
+          const snap = (
+            await client.getOptionSnapshots([p.contractSymbol])
+          ).get(p.contractSymbol);
+          if (!snap || snap.mid === null) {
+            state.pendingEntries = state.pendingEntries.filter(
+              (x) => x.orderId !== p.orderId,
+            );
+            emit(
+              {
+                type: "signal",
+                symbol: p.contractSymbol,
+                side: "buy",
+                qty: p.qty,
+                price: null,
+                pnl: null,
+                reason: `PAPER · entry abandoned at reprice — no fresh two-sided quote for ${p.contractSymbol} (decision #${p.decisionId})`,
+              },
+              p.decisionId,
+            );
+            save();
+            continue;
+          }
+          const newLimit = round2(snap.mid);
+          const replacement: AlpacaOrder = await client.createOrder({
+            symbol: p.contractSymbol,
+            qty: p.qty,
+            side: "buy",
+            type: "limit",
+            timeInForce: "day",
+            limitPrice: newLimit,
+          });
+          p.orderId = replacement.id;
+          p.limitPrice = newLimit;
+          p.submittedAtMs = now().getTime();
+          p.repriced = true;
+          emit(
+            {
+              type: "signal",
+              symbol: p.contractSymbol,
+              side: "buy",
+              qty: p.qty,
+              price: newLimit,
+              pnl: null,
+              reason: `PAPER · entry repriced at fresh mid ${money(newLimit)} after 60 s unfilled (decision #${p.decisionId})`,
+            },
+            p.decisionId,
+          );
+          save();
+        } else {
+          await client.cancelOrder(p.orderId);
+          state.pendingEntries = state.pendingEntries.filter(
+            (x) => x.orderId !== p.orderId,
+          );
+          emit(
+            {
+              type: "signal",
+              symbol: p.contractSymbol,
+              side: "buy",
+              qty: p.qty,
+              price: null,
+              pnl: null,
+              reason: `PAPER · entry abandoned — still unfilled 60 s after the reprice, cancelled per the limit-at-mid rule (decision #${p.decisionId})`,
+            },
+            p.decisionId,
+          );
+          save();
+        }
+      }
+    }
+    for (const p of [...state.pendingExits]) {
+      let order: AlpacaOrder;
+      try {
+        order = await client.getOrder(p.orderId);
+      } catch {
+        continue;
+      }
+      if (order.status === "filled" && order.filledAvgPrice !== null) {
+        const pnl = round2(
+          (order.filledAvgPrice - p.entryPremium) * p.qty * 100,
+        );
+        addRealized(pnl);
+        delete state.contracts[p.contractSymbol];
+        state.pendingExits = state.pendingExits.filter(
+          (x) => x.orderId !== p.orderId,
+        );
+        emit(
+          {
+            type: "close",
+            symbol: p.contractSymbol,
+            side: "sell",
+            qty: p.qty,
+            price: round2(order.filledAvgPrice),
+            pnl,
+            reason: `PAPER · exit filled @ ${money(order.filledAvgPrice)}/contract — ${p.trigger}`,
+          },
+          p.decisionId,
+        );
+        save();
+      } else if (
+        ["canceled", "cancelled", "expired", "rejected"].includes(order.status)
+      ) {
+        state.pendingExits = state.pendingExits.filter(
+          (x) => x.orderId !== p.orderId,
+        );
+        console.warn(
+          `[vega] ${bot.name}: exit order for ${p.contractSymbol} ended ${order.status}; position remains open and will re-trigger`,
+        );
+        save();
+      }
+    }
+  }
+
+  /** Submit (or, in shadow, settle) an exit for a tracked contract. */
+  async function submitExit(
+    contractSymbol: string,
+    trigger: string,
+    decisionReason: string,
+    currentMid: number,
+  ): Promise<void> {
+    const pos = book()[contractSymbol];
+    if (!pos) return;
+    if (shadow) {
+      const decisionId = emit({
+        type: "signal",
+        symbol: contractSymbol,
+        side: "sell",
+        qty: pos.qty,
+        price: round2(currentMid),
+        pnl: null,
+        reason: decisionReason,
+      });
+      const pnl = round2((currentMid - pos.entryPremium) * pos.qty * 100);
+      addRealized(pnl);
+      delete state.shadowContracts[contractSymbol];
+      emit(
+        {
+          type: "close",
+          symbol: contractSymbol,
+          side: "sell",
+          qty: pos.qty,
+          price: round2(currentMid),
+          pnl,
+          reason: `SHADOW · would-be exit filled at mid ${money(currentMid)}/contract — ${trigger}`,
+        },
+        decisionId,
+      );
+      save();
+      return;
+    }
+    const decisionId = emit({
+      type: "signal",
+      symbol: contractSymbol,
+      side: "sell",
+      qty: pos.qty,
+      price: round2(currentMid),
+      pnl: null,
+      reason: decisionReason,
+    });
+    const order = await client.closePosition(contractSymbol);
+    state.pendingExits.push({
+      orderId: order.id,
+      contractSymbol,
+      qty: pos.qty,
+      entryPremium: pos.entryPremium,
+      decisionId,
+      trigger,
+    });
+    save();
+  }
+
+  /** Premium/time/expiry exit checks against live mids (market hours). */
+  async function managePositions(): Promise<void> {
+    const positions = book();
+    const symbols = Object.keys(positions);
+    if (symbols.length === 0) return;
+    let snapshots: Map<string, OptionSnapshot>;
+    try {
+      snapshots = await client.getOptionSnapshots(symbols);
+    } catch (err) {
+      console.warn(
+        `[vega] ${bot.name}: snapshot fetch for exit checks failed:`,
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+    const today = etDate(now());
+    for (const [symbol, pos] of Object.entries(positions)) {
+      if (
+        !shadow &&
+        state.pendingExits.some((p) => p.contractSymbol === symbol)
+      ) {
+        continue;
+      }
+      const snap = snapshots.get(symbol);
+      if (!snap || snap.mid === null || pos.entryPremium <= 0) continue;
+      const mid = snap.mid;
+      const gainPct = ((mid - pos.entryPremium) / pos.entryPremium) * 100;
+      const daysHeld = tradingDaysBetween(pos.entryDate, today);
+      const daysToExpiry = tradingDaysBetween(today, pos.expiry);
+      let trigger: string | null = null;
+      let why = "";
+      if (mid >= pos.entryPremium * (1 + params.takeProfitPct / 100)) {
+        trigger = `take profit (+${params.takeProfitPct}% of premium)`;
+        why =
+          `mid ${money(mid)} is +${gainPct.toFixed(1)}% over entry premium ${money(pos.entryPremium)} ` +
+          `(target ${money(pos.entryPremium * (1 + params.takeProfitPct / 100))})`;
+      } else if (mid <= pos.entryPremium * (1 - params.stopLossPct / 100)) {
+        trigger = `stop loss (−${params.stopLossPct}% of premium)`;
+        why =
+          `mid ${money(mid)} is ${gainPct.toFixed(1)}% under entry premium ${money(pos.entryPremium)} ` +
+          `(limit ${money(pos.entryPremium * (1 - params.stopLossPct / 100))})`;
+      } else if (daysHeld >= params.timeStopDays) {
+        trigger = `time stop (${params.timeStopDays} trading days)`;
+        why = `held ${daysHeld} trading days since ${pos.entryDate} at mid ${money(mid)} (${gainPct.toFixed(1)}% vs entry ${money(pos.entryPremium)}) — neither target hit`;
+      } else if (daysToExpiry <= 2) {
+        trigger = "expiry guardrail (2 trading days before expiry)";
+        why = `${symbol} expires ${pos.expiry} — ${daysToExpiry} trading day(s) left; force-exit so nothing rides into expiration`;
+      }
+      if (trigger !== null) {
+        await submitExit(
+          symbol,
+          trigger,
+          `${tag} · EXIT — ${trigger}: ${why} · Risk Gate: APPROVED (exit) · ${paramsSnapshot()}`,
+          mid,
+        );
+      }
+    }
+  }
+
+  /** The hourly screen → signal → pick → gate → order pipeline. */
+  async function evaluate(): Promise<void> {
+    const today = etDate(now());
+    const dailyStart = new Date(
+      now().getTime() - DAILY_BARS_LOOKBACK_DAYS * 86_400_000,
+    ).toISOString();
+    const hourlyStart = new Date(
+      now().getTime() - HOURLY_BARS_LOOKBACK_DAYS * 86_400_000,
+    ).toISOString();
+    let screenedIn = 0;
+    let signals = 0;
+    let entries = 0;
+    // Phase 6: the old merged "rejected" bucket is split so the
+    // summary closes arithmetically — every signal lands in exactly
+    // one of entries / gateRejected / noTrade / fetchFailed /
+    // guardBlocked (see the summary line and PHASE6-DELIVERY.md).
+    let gateRejected = 0;
+    let noTrade = 0;
+    let fetchFailed = 0;
+    let guardBlocked = 0;
+
+    for (const symbol of params.pool) {
+      // ---- Screen (daily data): price floor + ATR -------------------
+      let daily: DailyBar[];
+      try {
+        daily = completedDailyBars(
+          await client.getDailyBars(symbol, dailyStart),
+        );
+      } catch {
+        continue;
+      }
+      if (daily.length < ATR_PERIOD + 1) continue;
+      const atr = atrMean(daily, ATR_PERIOD);
+      let price = daily[daily.length - 1]!.close;
+      try {
+        const latest = await client.getLatestPrice(symbol);
+        if (Number.isFinite(latest) && latest > 0) price = latest;
+      } catch {
+        /* screen on the last close */
+      }
+      if (atr === null) continue;
+      const atrPct = (atr / price) * 100;
+      if (price < params.priceMin) continue;
+      if (atrPct < ATR_MIN_PCT) continue;
+      screenedIn += 1;
+
+      // ---- Signal (hourly bars): 20-hour breakout / breakdown -------
+      let hourly: TimedBar[];
+      try {
+        hourly = completedHourlyBars(
+          await client.getHourlyBars(symbol, hourlyStart),
+        );
+      } catch {
+        continue;
+      }
+      if (hourly.length < 21) continue;
+      const lastBar = hourly[hourly.length - 1]!;
+      const priorHi = priorHighTimed(hourly, 20);
+      const priorLo = priorLowTimed(hourly, 20);
+      let direction: "call" | "put" | null = null;
+      let level = 0;
+      if (priorHi !== null && lastBar.close > priorHi) {
+        direction = "call";
+        level = priorHi;
+      } else if (priorLo !== null && lastBar.close < priorLo) {
+        direction = "put";
+        level = priorLo;
+      }
+      if (direction === null) continue;
+      signals += 1;
+
+      const signalText =
+        direction === "call"
+          ? `hourly breakout: last completed hour closed ${money(lastBar.close)}, above the prior 20-hour high ${money(level)}`
+          : `hourly breakdown: last completed hour closed ${money(lastBar.close)}, below the prior 20-hour low ${money(level)}`;
+      const screenText =
+        `${signalText}; ATR(${ATR_PERIOD}) ${atrPct.toFixed(1)}% of price ${money(price)} (min ${ATR_MIN_PCT}%); ` +
+        `price at or above the ${money(params.priceMin)} floor (no price ceiling)`;
+
+      // One options position per underlying at a time (diversification
+      // across the pool; his file caps positions, not per-name stacks).
+      const heldHere =
+        Object.values(book()).some((p) => p.underlying === symbol) ||
+        state.pendingEntries.some((p) => p.underlying === symbol);
+      if (heldHere) {
+        gateRejected += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason: `${tag} · ENTRY signal — ${screenText} · Risk Gate: REJECTED — already holding a position on ${symbol} · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+
+      // ---- Earnings guard (fail-closed) ------------------------------
+      if (!state.earnings.available) {
+        guardBlocked += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason: `${tag} · ENTRY signal — ${screenText} · Earnings guard: earnings calendar unavailable — entry blocked (fail-closed, never a silent pass) · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+      const earningsDate = earningsBlock(symbol);
+      if (earningsDate !== null) {
+        guardBlocked += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason: `${tag} · ENTRY signal — ${screenText} · Earnings guard: ${symbol} reports ${earningsDate}, inside the ${EARNINGS_GUARD_DAYS}-day guard window — no entry · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+
+      // ---- Contract pick ----------------------------------------------
+      const gte = addDays(today, EXPIRY_MIN_DAYS);
+      const lte = addDays(today, EXPIRY_MAX_DAYS);
+      let contracts: OptionContract[];
+      try {
+        contracts = await client.getOptionContracts(symbol, direction, gte, lte);
+      } catch (err) {
+        // Phase 6: a failed chain fetch is a DECISION, not a console
+        // whisper — the signal is accounted for (fetch-failed) and
+        // the error detail lands in the Decisions tab.
+        fetchFailed += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason:
+            `${tag} · ENTRY signal — ${screenText} · Contract pick: NO TRADE — chain fetch failed for ${symbol} ${direction}s ` +
+            `in the 2–4 week expiry window (${gte} → ${lte}): ${err instanceof Error ? err.message : String(err)} · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+      if (contracts.length === 0) {
+        noTrade += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason: `${tag} · ENTRY signal — ${screenText} · Contract pick: NO TRADE — no ${direction}s listed inside the 2–4 week expiry window (${gte} → ${lte}) · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+      let snapshots: Map<string, OptionSnapshot>;
+      try {
+        snapshots = await client.getOptionSnapshots(
+          contracts.map((c) => c.symbol),
+        );
+      } catch (err) {
+        // Phase 6: same rule as the chain fetch — a decision record,
+        // counted fetch-failed, never just a console warning.
+        fetchFailed += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason:
+            `${tag} · ENTRY signal — ${screenText} · Contract pick: NO TRADE — snapshot fetch failed for the ${symbol} chain ` +
+            `(${contracts.length} contracts listed in the window): ${err instanceof Error ? err.message : String(err)} · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+      const candidates: ChainCandidate[] = contracts
+        .filter((c) => snapshots.has(c.symbol))
+        .map((c) => ({ contract: c, snapshot: snapshots.get(c.symbol)! }));
+      const pickTarget =
+        direction === "call"
+          ? price * (1 + OTM_TARGET_PCT / 100)
+          : price * (1 - OTM_TARGET_PCT / 100);
+      recordIv(symbol, candidates, pickTarget);
+      const pick = pickContract(candidates, today, direction, price);
+      if (!pick.ok) {
+        noTrade += 1;
+        emit({
+          type: "signal",
+          symbol,
+          side: "buy",
+          qty: null,
+          price: round2(price),
+          pnl: null,
+          reason: `${tag} · ENTRY signal — ${screenText} · Contract pick: NO TRADE — ${pick.reason} · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+      const { contract, snapshot } = pick.candidate;
+      // The pick's liquidity gates guarantee a two-sided quote.
+      const mid = snapshot.mid!;
+      const premiumDollars = mid * 100; // exactly 1 contract
+      const contractText =
+        `contract ${contract.symbol}: ${symbol} ${contract.strike} ${direction}, exp ${contract.expiry}, ` +
+        `strike ${OTM_TARGET_PCT}% out of the money (spot ${money(price)}, target ${money(pick.targetStrike)}), ` +
+        `delta ${snapshot.delta !== null ? snapshot.delta.toFixed(2) : "n/a"}, IV ${snapshot.iv !== null ? `${(snapshot.iv * 100).toFixed(0)}%` : "n/a"}, ` +
+        `OI ${contract.openInterest.toLocaleString("en-US")}, bid ${snapshot.bid.toFixed(2)} / ask ${snapshot.ask.toFixed(2)} / mid ${mid.toFixed(2)}`;
+
+      // ---- Premium cap (enforced at pick time, Keith 2026-11-03) ------
+      // Exactly 1 contract per position; that contract at mid must cost
+      // ≤ maxPositionPct% of the book ($600 on the $10,000 start). This
+      // is the cap check — the Risk Gate below uses the same book equity
+      // and never re-litigates premium, so an over-cap pick produces
+      // exactly one rejection record.
+      const capDollars = bookEquity() * (params.maxPositionPct / 100);
+      if (premiumDollars > capDollars + 1e-9) {
+        gateRejected += 1;
+        emit({
+          type: "signal",
+          symbol: contract.symbol,
+          side: "buy",
+          qty: 1,
+          price: round2(snapshot.ask),
+          pnl: null,
+          reason:
+            `${tag} · ENTRY signal — ${screenText} · ${contractText} · Risk Gate: REJECTED — ` +
+            `premium cap: one contract at mid ${money(mid)} costs ${money(premiumDollars)}, over the ${params.maxPositionPct}% premium cap (${money(capDollars)} of the ${money(bookEquity())} book) · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+
+      // ---- Risk Gate ---------------------------------------------------
+      const openCount =
+        Object.keys(book()).length + (shadow ? 0 : state.pendingEntries.length);
+      const qty = 1;
+      const committed = Object.values(book()).reduce(
+        (sum, p) => sum + p.entryPremium * p.qty * 100,
+        0,
+      );
+      const estPremium = premiumDollars;
+      const dailyCapHit =
+        realizedToday() <= -((params.maxDailyLossPct / 100) * startCapital());
+
+      let verdict: string | null = null;
+      if (dailyCapHit) {
+        verdict = `daily loss cap hit — realized ${money(realizedToday())} today vs cap ${money(-((params.maxDailyLossPct / 100) * startCapital()))}`;
+      } else if (openCount >= params.maxPositions) {
+        verdict = `max positions reached (${openCount}/${params.maxPositions})`;
+      } else if (committed + estPremium > bookEquity()) {
+        verdict = `the book is fully committed (${money(committed)} open premium + ${money(estPremium)} new > ${money(bookEquity())} book equity)`;
+      }
+
+      if (verdict !== null) {
+        gateRejected += 1;
+        emit({
+          type: "signal",
+          symbol: contract.symbol,
+          side: "buy",
+          qty,
+          price: round2(snapshot.ask),
+          pnl: null,
+          reason: `${tag} · ENTRY signal — ${screenText} · ${contractText} · Risk Gate: REJECTED — ${verdict} · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+
+      const decisionId = emit({
+        type: "signal",
+        symbol: contract.symbol,
+        side: "buy",
+        qty,
+        price: round2(mid),
+        pnl: null,
+        reason:
+          `${tag} · ENTRY signal — ${screenText} · ${contractText} · Risk Gate: APPROVED — ` +
+          `${qty} contract ≈ ${money(premiumDollars)} premium at mid (cap ${money(capDollars)} = ${params.maxPositionPct}% of the ${money(bookEquity())} book); ` +
+          `positions ${openCount}/${params.maxPositions}; earnings clear · ${paramsSnapshot()} · ` +
+          (shadow
+            ? "order intent ONLY — shadow mode places no broker orders"
+            : `order: limit buy at mid ${money(mid)}, one reprice after 60 s, then cancel`),
+      });
+
+      if (shadow) {
+        state.shadowContracts[contract.symbol] = {
+          underlying: symbol,
+          optionType: direction,
+          qty,
+          entryPremium: mid,
+          entryDate: today,
+          expiry: contract.expiry,
+          decisionId,
+        };
+        emit(
+          {
+            type: "open",
+            symbol: contract.symbol,
+            side: "buy",
+            qty,
+            price: round2(mid),
+            pnl: null,
+            reason: `SHADOW · would-be entry filled at mid ${money(mid)}/contract — ${contract.symbol} tracked in the shadow book for exit checks`,
+          },
+          decisionId,
+        );
+      } else {
+        const order = await client.createOrder({
+          symbol: contract.symbol,
+          qty,
+          side: "buy",
+          type: "limit",
+          timeInForce: "day",
+          limitPrice: round2(mid),
+        });
+        state.pendingEntries.push({
+          orderId: order.id,
+          contractSymbol: contract.symbol,
+          underlying: symbol,
+          optionType: direction,
+          qty,
+          limitPrice: round2(mid),
+          decisionId,
+          submittedAtMs: now().getTime(),
+          repriced: false,
+        });
+      }
+      entries += 1;
+      save();
+    }
+
+    console.log(
+      `[vega] ${bot.name}: hourly evaluation complete (${tag}) — ${screenedIn} screened in, ${signals} signals, ` +
+        `${entries} entries ${shadow ? "intended" : "submitted"}, ${gateRejected} gate-rejected, ${noTrade} no-trade, ` +
+        `${fetchFailed} fetch-failed, ${guardBlocked} earnings-blocked; ` +
+        `book equity ${money(bookEquity())}`,
+    );
+  }
+
+  /** Kill + liquidate: cancel his orders, close his contracts, report. */
+  async function handleLiquidations(): Promise<void> {
+    for (const req of control.drainLiquidations()) {
+      if (req.codename !== bot.codename) continue;
+      const closed: {
+        codename: string;
+        symbol: string;
+        qty: number | null;
+        price: number | null;
+        pnl: number | null;
+      }[] = [];
+      const failed: { codename: string; symbol: string; reason: string }[] = [];
+      try {
+        if (shadow) {
+          const symbols = Object.keys(state.shadowContracts);
+          let snapshots = new Map<string, OptionSnapshot>();
+          try {
+            snapshots = await client.getOptionSnapshots(symbols);
+          } catch {
+            /* settle at entry premium when no quote is available */
+          }
+          for (const symbol of symbols) {
+            const pos = state.shadowContracts[symbol]!;
+            const mid = snapshots.get(symbol)?.mid ?? pos.entryPremium;
+            const pnl = round2((mid - pos.entryPremium) * pos.qty * 100);
+            addRealized(pnl);
+            closed.push({
+              codename: bot.codename,
+              symbol,
+              qty: pos.qty,
+              price: round2(mid),
+              pnl,
+            });
+            delete state.shadowContracts[symbol];
+          }
+          save();
+        } else {
+          await cancelOpenOrders();
+          state.pendingEntries = [];
+          const positions = await client.getPositions();
+          for (const pos of positions) {
+            if (!isHers(pos.symbol)) continue;
+            const tracked = state.contracts[pos.symbol];
+            try {
+              const order = await client.closePosition(pos.symbol);
+              state.pendingExits.push({
+                orderId: order.id,
+                contractSymbol: pos.symbol,
+                qty: pos.qty,
+                entryPremium: tracked?.entryPremium ?? pos.avgEntryPrice,
+                decisionId: tracked?.decisionId ?? "liquidation",
+                trigger: "KILL + LIQUIDATE",
+              });
+              closed.push({
+                codename: bot.codename,
+                symbol: pos.symbol,
+                qty: pos.qty,
+                price: round2(pos.currentPrice),
+                pnl: tracked
+                  ? round2(
+                      (pos.currentPrice - tracked.entryPremium) *
+                        pos.qty *
+                        100,
+                    )
+                  : null,
+              });
+            } catch (err) {
+              failed.push({
+                codename: bot.codename,
+                symbol: pos.symbol,
+                reason: `close order failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            }
+          }
+          save();
+        }
+      } catch (err) {
+        failed.push({
+          codename: bot.codename,
+          symbol: "(all)",
+          reason: `liquidation failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      await control.reportLiquidation(req.id, bot.codename, closed, failed);
+      console.log(
+        `[vega] ${bot.name}: KILL + LIQUIDATE executed (${tag}) — ${closed.length} close orders submitted, ${failed.length} failures`,
+      );
+    }
+  }
+
+  /** Adopt his broker contract positions at boot (live mode only). */
+  async function reconcile(): Promise<void> {
+    const positions = await client.getPositions();
+    for (const pos of positions) {
+      if (!isHers(pos.symbol)) continue;
+      if (
+        !state.contracts[pos.symbol] &&
+        !state.pendingExits.some((p) => p.contractSymbol === pos.symbol)
+      ) {
+        const occ = parseOccSymbol(pos.symbol)!;
+        state.contracts[pos.symbol] = {
+          underlying: occ.underlying,
+          optionType: occ.optionType,
+          qty: pos.qty,
+          entryPremium: pos.avgEntryPrice,
+          // Entry date unknown for adopted positions: the time stop
+          // counts from adoption (logged, never hidden).
+          entryDate: etDate(now()),
+          expiry: occ.expiry,
+          decisionId: "reconciled",
+        };
+        emit({
+          type: "open",
+          symbol: pos.symbol,
+          side: "buy",
+          qty: pos.qty,
+          price: round2(pos.avgEntryPrice),
+          pnl: null,
+          reason: `PAPER · contract position reconciled at engine start — ${pos.qty} contract(s) held @ avg entry ${money(pos.avgEntryPrice)} (opened before this engine session; time stop counts from today)`,
+        });
+      }
+    }
+    for (const symbol of Object.keys(state.contracts)) {
+      if (
+        !positions.some((p) => p.symbol === symbol) &&
+        !state.pendingExits.some((p) => p.contractSymbol === symbol)
+      ) {
+        console.log(
+          `[vega] ${bot.name}: ${symbol} in state but not at broker — dropping from tracking (closed, expired or exercised outside the engine)`,
+        );
+        delete state.contracts[symbol];
+      }
+    }
+    save();
+  }
+
+  async function onHalt(): Promise<void> {
+    if (!shadow) {
+      await cancelOpenOrders();
+      for (const p of state.pendingEntries) {
+        emit(
+          {
+            type: "signal",
+            symbol: p.contractSymbol,
+            side: "buy",
+            qty: p.qty,
+            price: null,
+            pnl: null,
+            reason: `PAPER · entry order cancelled by the kill switch (decision #${p.decisionId})`,
+          },
+          p.decisionId,
+        );
+      }
+      state.pendingEntries = [];
+      save();
+    }
+    console.log(
+      `[vega] ${bot.name}: HALTED — ${shadow ? "shadow pipeline gated" : "open orders cancelled"}, no order flow until resumed`,
+    );
+  }
+
+  async function tick(): Promise<void> {
+    // Vega's hourly evaluation is heavier than one 30 s tick in the
+    // worst case; never let ticks overlap (Trendia's daily eval can
+    // afford the race, an hourly options screen cannot).
+    if (tickBusy) return;
+    tickBusy = true;
+    try {
+      // Reset All Data (v22): checked first, before liquidations and
+      // polls, so nothing from the old book can act or report into
+      // the fresh history. Idempotent per reset id. Broker caveat:
+      // this wipes the APP book only — positions open at the broker
+      // are NOT closed; they become untracked ("foreign") and the
+      // state-only reconcile ignores them from here on.
+      const pendingReset = control.pendingReset?.();
+      if (pendingReset && pendingReset.id !== lastResetId) {
+        lastResetId = pendingReset.id;
+        if (!shadow) await cancelOpenOrders().catch(() => {});
+        state = freshState();
+        haltCancelHandled = false;
+        booted = false;
+        save();
+        control.noteResetApplied?.(pendingReset.id, bot.codename);
+        console.log(
+          `[vega] ${bot.name}: DATA RESET applied — book wiped back to the $${STARTING_CAPITAL} start; app positions erased (broker-side positions untouched, now untracked)`,
+        );
+        return;
+      }
+
+      await refreshEarningsIfStale();
+      await handleLiquidations();
+      if (!shadow) await pollPending();
+
+      if (control.isHalted(bot.codename)) {
+        if (!haltCancelHandled) {
+          haltCancelHandled = true;
+          await onHalt();
+        }
+        return;
+      }
+      haltCancelHandled = false;
+
+      if (!booted) {
+        booted = true;
+        if (!shadow) {
+          await reconcile();
+        } else {
+          console.log(
+            `[vega] ${bot.name}: shadow book restored — ${Object.keys(state.shadowContracts).length} shadow contract(s) tracked; broker reconcile skipped in shadow mode`,
+          );
+        }
+      }
+
+      const clock = await client.getClock();
+      if (clock.isOpen) {
+        await managePositions();
+        const key = etHourKey(now());
+        if (state.lastEvalHour !== key) {
+          await evaluate();
+          state.lastEvalHour = key;
+          save();
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[vega] ${bot.name}: tick failed (will retry):`,
+        err instanceof Error ? err.message : err,
+      );
+    } finally {
+      tickBusy = false;
+    }
+  }
+
+  console.log(
+    `[vega] ${bot.name}: Phase 3 ${shadow ? "SHADOW" : "live-paper"} runner started — pool ${params.pool.join("/")}, ` +
+      `book ${money(bookEquity())}, hourly screen + breakout evaluation in market hours` +
+      (shadow
+        ? "; VEGA_SHADOW is on — full pipeline, decision/order-intent events only, NO broker orders"
+        : "; entries limit-at-mid with one reprice"),
+  );
+  void tick();
+  setInterval(() => void tick(), tickMs);
+}

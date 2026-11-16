@@ -35,7 +35,9 @@ Rust tests: `cd src-tauri && cargo test`
 
 ## Not done yet
 
-- The bots don't trade from the device yet. That needs the engine moved into a
-  platform-neutral `@fleet/core` package (phase 1 of the plan).
+- The bots don't trade from the device yet. The strategies now live in the
+  platform-neutral `@fleet/core` package; the device still needs its host
+  adapters (a vault-signed Alpaca client, a Kalshi signer command, a local
+  kill switch, and app-storage `StateStore`) and a runner screen.
 - Touch ID / Windows Hello unlock, signed installers + auto-update, and the
   iOS/Android builds (need full Xcode, and a JDK + Android SDK).

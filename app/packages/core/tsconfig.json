@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // DOM lib supplies fetch, URL, crypto, timers and console — the APIs every
+    // host (Node 22, WebView) has. No "node" types: a node:* import or a
+    // process.env read here is a type error, which keeps core portable.
+    "lib": ["ES2022", "DOM"],
+    "types": []
+  },
+  "include": ["src"]
+}

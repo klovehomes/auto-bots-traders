@@ -1,0 +1,23 @@
+{
+  "name": "@fleet/core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Platform-neutral trading engine: strategies, Risk Gate, indicators, venue clients. No Node APIs.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@fleet/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}
