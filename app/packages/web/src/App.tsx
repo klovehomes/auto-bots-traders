@@ -240,6 +240,16 @@ function Dashboard() {
   const [modeBusy, setModeBusy] = useState(false);
   const [status, setStatus] = useState<WsStatus>("connecting");
   const [events, setEvents] = useState<FleetEvent[]>([]);
+  // Totals-bar sync indicator (PM12, port of fleet v36): true while
+  // this tab is (re)seeding its event stream from the API's persisted
+  // history. Starts true on mount (the Phase 6 seed has not landed
+  // yet), is set again at the start of every reseed
+  // (reseedAfterReset), and clears only when that seed/reseed data
+  // has actually been applied to `events` — or when the seed fetch
+  // settles as failed, since history is best-effort and the live
+  // stream continues (see the seed/reseed comments below).
+  // No timer drives this state.
+  const [syncing, setSyncing] = useState(true);
   const [feedOpen, setFeedOpen] = useState(params.get("feed") === "open");
   const [feedTab, setFeedTab] = useState<FeedTab>("trades");
   // Phase PM3: bumped every time a user-selection batch books, so the
@@ -351,6 +361,9 @@ function Dashboard() {
    * that beats the fetch back is kept exactly once.
    */
   function reseedAfterReset(): void {
+    // PM12: a reseed is a resync — the totals bar shows its progress
+    // animation from here until the fresh seed below has been applied.
+    setSyncing(true);
     seenSeqRef.current.clear();
     setEvents([]);
     fetch(`${API_BASE}/events/history`)
@@ -365,16 +378,27 @@ function Dashboard() {
           seenSeqRef.current.add(e.seq);
           return true;
         });
-        if (fresh.length === 0) return;
+        if (fresh.length === 0) {
+          // The fresh seed landed and it is empty (e.g. just the
+          // reset record has no trade events yet) — that IS the seed
+          // applied, so the resync is over.
+          setSyncing(false);
+          return;
+        }
         setEvents((prev) =>
           trimEvents(
             [...prev, ...fresh].sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0)),
           ),
         );
+        // PM12: clear only after the fresh seed has been applied above.
+        setSyncing(false);
       })
       .catch(() => {
         // Best-effort: the live stream still delivers the DATA_RESET
-        // record and everything after it.
+        // record and everything after it. The reseed attempt has
+        // settled, so end the resync indicator rather than leaving
+        // the totals bar animating over live data forever.
+        setSyncing(false);
       });
   }
 
@@ -653,7 +677,12 @@ function Dashboard() {
           seenSeqRef.current.add(e.seq);
           return true;
         });
-        if (fresh.length === 0) return;
+        if (fresh.length === 0) {
+          // PM12: the initial seed landed and it is empty — the seed
+          // has been applied, so the initial sync is over.
+          setSyncing(false);
+          return;
+        }
         setEvents((prev) => {
           const seen = new Set<number>();
           const merged: FleetEvent[] = [];
@@ -678,10 +707,16 @@ function Dashboard() {
           }
           return trimEvents(merged);
         });
+        // PM12: clear only after the initial seed has been applied
+        // to `events` above.
+        setSyncing(false);
       })
       .catch(() => {
         // History is best-effort on load; the live stream still runs
         // and any gap is limited to events from before this load.
+        // The seed attempt has settled, so end the initial sync
+        // indicator rather than animating over live data forever.
+        if (!cancelled) setSyncing(false);
       });
     return () => {
       cancelled = true;
@@ -710,6 +745,14 @@ function Dashboard() {
           if (msg.entry) mergeAuditEntry(msg.entry);
           // A reset broadcast (from any open dashboard) restarts the
           // history sequence — reseed this tab's stream too.
+          // PM12 deliberate difference from fleet v36: the fleet app
+          // also reseeds on an engine-restart broadcast
+          // (entry.action === "restart", its v30 Watch List restart),
+          // but no "restart" audit action exists in this app — its
+          // AuditEntry union has no "restart", ControlState has no
+          // pendingRestart, nothing calls POST /engine/restart, and
+          // PolyCrypt9000's Watch List is read-only — so reset is the
+          // only broadcast reseed trigger here.
           if (msg.entry?.action === "reset") reseedAfterReset();
           return;
         }
@@ -926,24 +969,44 @@ function Dashboard() {
 
       {botsError && <p className="error">Could not load bots: {botsError}</p>}
 
-      <section className="totals-bar" aria-label="Trader bot realized totals">
+      <section
+        className="totals-bar"
+        aria-label="Trader bot realized totals"
+        aria-busy={syncing}
+      >
         <div className="total">
           <span className="total-label">Realized profits</span>
-          <span className="total-value pnl-pos">{fmtMoney(totals.profits)}</span>
+          {syncing ? (
+            <span className="total-value total-syncing" role="status" aria-label="Syncing" />
+          ) : (
+            <span className="total-value pnl-pos">{fmtMoney(totals.profits)}</span>
+          )}
         </div>
         <div className="total">
           <span className="total-label">Realized losses</span>
-          <span className="total-value pnl-neg">{fmtMoney(-totals.losses)}</span>
+          {syncing ? (
+            <span className="total-value total-syncing" role="status" aria-label="Syncing" />
+          ) : (
+            <span className="total-value pnl-neg">{fmtMoney(-totals.losses)}</span>
+          )}
         </div>
         <div className="total">
           <span className="total-label">Net realized</span>
-          <span className={`total-value ${totals.net >= 0 ? "pnl-pos" : "pnl-neg"}`}>
-            {fmtMoney(totals.net, true)}
-          </span>
+          {syncing ? (
+            <span className="total-value total-syncing" role="status" aria-label="Syncing" />
+          ) : (
+            <span className={`total-value ${totals.net >= 0 ? "pnl-pos" : "pnl-neg"}`}>
+              {fmtMoney(totals.net, true)}
+            </span>
+          )}
         </div>
         <div className="total total-meta">
           <span className="total-label">Closed trades seen</span>
-          <span className="total-value">{totals.closes}</span>
+          {syncing ? (
+            <span className="total-value total-syncing" role="status" aria-label="Syncing" />
+          ) : (
+            <span className="total-value">{totals.closes}</span>
+          )}
         </div>
       </section>
 

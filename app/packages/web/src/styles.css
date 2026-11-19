@@ -228,6 +228,44 @@ body {
   color: #aeb9c6;
 }
 
+/* Totals-bar sync placeholder (PM12, port of fleet v36): ONE
+   treatment — a shimmer bar rendered in place of each totals value
+   while the app is (re)seeding (see `syncing` in App.tsx). The slot
+   keeps the value's footprint (min-height matches the 24px value
+   line; min-width gives the bar a stable size) so the totals bar
+   does not jump when real values land. Labels stay visible above
+   it; only the value slot animates. CSS copied verbatim from the
+   fleet v36 treatment — same class name, same keyframes. */
+.total-syncing {
+  display: block;
+  min-width: 96px;
+  min-height: 29px;
+  border-radius: 6px;
+  background: linear-gradient(
+    100deg,
+    rgba(139, 152, 169, 0.18) 40%,
+    rgba(174, 185, 198, 0.38) 50%,
+    rgba(139, 152, 169, 0.18) 60%
+  );
+  background-size: 200% 100%;
+  animation: totals-sync-shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes totals-sync-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -80% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .total-syncing {
+    animation: none;
+  }
+}
+
 /* ---------- Tabs ---------- */
 .tabs {
   display: flex;
@@ -1010,6 +1048,13 @@ body {
 
   .total-value {
     font-size: 19px;
+  }
+
+  /* PM12: keep the sync placeholder matched to the smaller mobile
+     value line, so the mobile totals bar does not jump either. */
+  .total-syncing {
+    min-width: 72px;
+    min-height: 23px;
   }
 
   .total {
