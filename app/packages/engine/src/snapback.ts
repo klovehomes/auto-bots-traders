@@ -53,9 +53,9 @@ import { tradingDaysBetween } from "./vega.js";
  *   still apply unchanged, and a homing-pigeon entry records the
  *   entry mean / entry side exactly like a z/RSI entry (Phase 6).
  * - Exits (checked every tick in market hours, in this order): stop
- *   loss at entry × (1 − 5%); the 5-trading-day max hold (the Vega
- *   time-stop convention: Mon–Fri days strictly after the entry date);
- *   +4% gain at entry × 1.04; reversion complete when the latest price
+ *   loss at entry × (1 − 5%); the 5-trading-day max hold (Mon–Fri
+ *   days strictly after the entry date);
+ *   +7% gain at entry × 1.07 (v35; was +4%); reversion complete when the latest price
  *   reaches the current 20-day mean of completed closes.
  *
  * PHASE 6 AMENDMENT (Keith, 2026-11-04 — "we are not trying to build
@@ -68,7 +68,7 @@ import { tradingDaysBetween } from "./vega.js";
  * - The mean-reversion exit now applies ONLY to positions entered
  *   BELOW the 20-day mean (the dip she actually bought). The entry
  *   records the mean at entry and which side of it the fill was on;
- *   a position entered at/above the mean exits only on the +4%
+ *   a position entered at/above the mean exits only on the +7%
  *   target, the −5% stop, or the 5-day max hold.
  * - Same-day re-entry cooldown: after any exit of a symbol, she does
  *   not re-enter that symbol again on the same ET trading day (the
@@ -120,7 +120,7 @@ const TREND_PERIOD = 200;
 const Z_ENTRY = -2.0;
 const RSI_PERIOD = 2;
 const RSI_ENTRY = 10;
-const TAKE_PROFIT_PCT = 4; // rules.exit prose in snapback.md ("+4%")
+const TAKE_PROFIT_PCT = 7; // rules.exit prose in snapback.md ("+7%") — was 4% before v35 (Keith, 2026-11-19)
 
 export interface SnapbackDeps {
   now?: () => Date;

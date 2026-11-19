@@ -26,7 +26,7 @@ risk:
   max_positions: 4
   assignment: accepted by design — puts are only sold on stocks Wesley is content to own
   defense: buy back a short option at 2x the premium collected, or roll it out before it gets there
-  early_exit: buy back at 50% of max premium profit and redeploy the cash into the next cycle
+  early_exit: buy back at 50% of the premium collected when the position is under 5 days old; once a position is 5 or more days old, buy back only when up at least 80% on the trade (the option's mid at or below 20% of the premium collected) — then redeploy the cash into the next cycle (Keith, 2026-11-19)
   max_daily_loss_pct: 6
 viz:
   color: "#4ade80"
@@ -49,6 +49,8 @@ cash; every call is fully covered by shares. Nothing naked, nothing
 leveraged, nothing clever.
 
 Premium is small per trade, and that is the point: it repeats. I take
-profits early at half the premium, I defend any position the market moves
+profits early — at half the premium while a trade is under five days old;
+after that I only buy back once I'm up 80% on the trade, or I let the
+cycle run its course. I defend any position the market moves
 against before it costs twice what it paid me, and I would rather skip a
 thin cycle than force a bad one. Slow money, collected on schedule.

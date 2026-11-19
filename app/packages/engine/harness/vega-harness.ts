@@ -12,7 +12,10 @@
  *      at least $95 (minimum purchase, Keith 2026-11-14) and at most the
  *      6%-of-book cap ($600 on the $10,000 book); an over-cap pick is
  *      rejected once
- *   4. take-profit / stop-loss / time-stop / expiry-guardrail exits
+ *   4. take-profit / stop-loss exits, and the v35 expiry time stop:
+ *      exit at ≤4 CALENDAR days to expiry (the 5-trading-day time
+ *      stop and the 2-trading-day expiry guardrail are gone — a
+ *      position held 6 trading days with DTE 10 must NOT exit)
  *   5. earnings guard blocks a name 2 days out; calendar-down fails closed
  *   6. Risk Gate rejections (premium cap, daily loss cap)
  *   7. halt cancels his open orders
@@ -84,7 +87,7 @@ const vegaBot: BotConfig = {
     max_positions: 6,
     stop_loss_pct: "35 (of premium paid — for options, the premium is the risk unit)",
     take_profit_pct: "50 (of premium paid)",
-    time_stop: "exit any contract 5 trading days after entry if neither target is hit",
+    exit_before_expiry_days: "4 (calendar days — exit any contract when it reaches 4 days from expiration if neither target is hit)",
     max_daily_loss_pct: 3,
   },
   philosophy: "",
@@ -723,45 +726,81 @@ async function main(): Promise<void> {
       JSON.stringify(s.events.filter((e) => e.type === "close")));
   }
 
-  console.log("— S9: time stop and expiry guardrail (shadow) —");
+  console.log("— S9: v35 expiry time stop (shadow) —");
   {
+    // (a) NO exit: entered 2026-10-27 — 6 TRADING days before Wed
+    // 2026-11-04, so the OLD 5-trading-day time stop would have
+    // fired. Expiry 2026-11-14 is 10 CALENDAR days out (> 4), and
+    // mid $2.10 is +5% (no TP/stop) — the position must HOLD.
+    const dte10 = occ("AMD", "261114", "C", 105); // exp Sat 2026-11-14
     const seed = {
       shadowContracts: {
-        [AMD_CALL]: {
+        [dte10]: {
           underlying: "AMD", optionType: "call", qty: 1, entryPremium: 2,
-          entryDate: "2026-10-28", expiry: "2026-11-20", decisionId: "seed-1",
+          entryDate: "2026-10-27", expiry: "2026-11-14", decisionId: "seed-1",
         },
       },
       lastEvalHour: "2026-11-04T10",
     };
     const s = boot({ shadow: true, seedState: seed, setup: (b) => {
-      b.snapshots.set(AMD_CALL, snapshot(AMD_CALL, 2.0, 2.2, 0.44));
+      b.snapshots.set(dte10, snapshot(dte10, 2.0, 2.2, 0.44));
     } });
-    await until("time-stop close", () =>
-      s.events.some((e) => e.type === "close" && e.reason.includes("time stop")));
-    check("time stop: position entered 5 trading days ago exits flat-ish (+$10)",
-      s.events.some((e) => e.type === "close" && e.pnl === 10));
+    await sleep(500);
+    check("v35 time stop: held 6 trading days with DTE 10 → NO exit (old 5-day stop is gone)",
+      !s.events.some((e) => e.type === "close") &&
+      !s.events.some((e) => e.type === "signal" && e.reason.includes("EXIT")),
+      JSON.stringify(s.events.map((e) => e.type)));
+    const stA = readState(s.statePath) as {
+      shadowContracts?: Record<string, unknown>;
+    };
+    check("v35 time stop: the held contract is still in the shadow book",
+      stA.shadowContracts?.[dte10] !== undefined);
 
-    const soon = occ("AMD", "261106", "C", 105); // exp Fri 2026-11-06
+    // (b) DTE exactly 4 (expiry Sun 2026-11-08, 4 calendar days
+    // after Wed 2026-11-04): the time stop fires.
+    const dte4 = occ("AMD", "261108", "C", 105); // exp 2026-11-08
     const s2 = boot({
       shadow: true,
       seedState: {
         shadowContracts: {
-          [soon]: {
+          [dte4]: {
             underlying: "AMD", optionType: "call", qty: 1, entryPremium: 2,
-            entryDate: "2026-11-03", expiry: "2026-11-06", decisionId: "seed-2",
+            entryDate: "2026-11-02", expiry: "2026-11-08", decisionId: "seed-2",
           },
         },
         lastEvalHour: "2026-11-04T10",
       },
       setup: (b) => {
-        b.snapshots.set(soon, snapshot(soon, 1.95, 2.15, 0.44));
+        b.snapshots.set(dte4, snapshot(dte4, 2.0, 2.2, 0.44));
       },
     });
-    await until("expiry-guardrail close", () =>
-      s2.events.some((e) => e.type === "close" && e.reason.includes("expiry guardrail")));
-    check("expiry guardrail: contract 2 trading days from expiry is force-exited",
-      s2.events.some((e) => e.type === "close" && e.symbol === soon));
+    await until("DTE-4 time-stop close", () =>
+      s2.events.some((e) => e.type === "close" && e.reason.includes("time stop")));
+    check("v35 time stop: contract at DTE 4 exits on the time stop (+$10)",
+      s2.events.some((e) => e.type === "close" && e.symbol === dte4 && e.pnl === 10 &&
+        e.reason.includes("calendar days to expiry")));
+
+    // (c) DTE 3 (expiry Sat 2026-11-07): also fires.
+    const dte3 = occ("AMD", "261107", "C", 105); // exp 2026-11-07
+    const s3 = boot({
+      shadow: true,
+      seedState: {
+        shadowContracts: {
+          [dte3]: {
+            underlying: "AMD", optionType: "call", qty: 1, entryPremium: 2,
+            entryDate: "2026-11-03", expiry: "2026-11-07", decisionId: "seed-3",
+          },
+        },
+        lastEvalHour: "2026-11-04T10",
+      },
+      setup: (b) => {
+        b.snapshots.set(dte3, snapshot(dte3, 1.95, 2.15, 0.44));
+      },
+    });
+    await until("DTE-3 time-stop close", () =>
+      s3.events.some((e) => e.type === "close" && e.reason.includes("time stop")));
+    check("v35 time stop: contract at DTE 3 exits on the time stop",
+      s3.events.some((e) => e.type === "close" && e.symbol === dte3));
   }
 
   console.log("— S10: limit-at-mid reprice after 60 s, then cancel (D5) —");

@@ -11,8 +11,9 @@
  *   4. no-signal evaluation (nothing fires, no orders, no events)
  *   5. Risk Gate rejections: position cap (one share > 20% of book),
  *      max positions (6/6), daily loss cap (1.5% of book)
- *   6. exits: reversion to the 20-day mean, +4% take profit, −5%
- *      stop loss, 5-trading-day max hold
+ *   6. exits: reversion to the 20-day mean, +7% take profit (v35;
+ *      was +4% — a +5% move must NOT exit), −5% stop loss,
+ *      5-trading-day max hold
  *   7. halt cancels HER open orders
  *   8. kill + liquidate closes ONLY her tracked positions (a foreign
  *      position on the shared account is untouched; exits are
@@ -24,7 +25,7 @@
  *  12. boot re-seed: untouched $5,000 book → $10,000; touched stays
  *  13. Phase 6: the mean-reversion exit applies only to positions
  *      entered BELOW the mean (an RSI(2) entry above the mean holds
- *      and exits on +4% instead — the 2026-11-04 TSLA churn shape);
+ *      and exits on +7% instead — the 2026-11-04 TSLA churn shape);
  *      same-day re-entry cooldown after an exit (next day allowed);
  *      legacy positions without the entry-side fields derive them
  *      at boot and behave accordingly
@@ -177,7 +178,7 @@ const trendBlockCloses = [...flat(100, 239), 97];
  * Shallow-dip name for the mean-reversion exit: base at $80, last 20
  * closes 19 × $100 + $99 (mean $99.95, SD ≈ $0.22). Live $98 gives a
  * deep z with the 200DMA ≈ $82 — entry at $98, and a return to
- * $100.50 completes the reversion while staying under entry × 1.04.
+ * $100.50 completes the reversion while staying under entry × 1.07.
  */
 const shallowCloses = [...flat(80, 220), ...flat(100, 19), 99];
 /**
@@ -193,7 +194,7 @@ const priceyCloses = [...flat(2000, 220), ...flat(2500, 19), 2125];
  * down (mean $79.10, SD ≈ $19.20, 200DMA ≈ $57.41). A live price of
  * $91.50 sits ABOVE the 20-day mean (z ≈ +0.65 — no z fire) but the
  * closing staircase drives RSI(2) to ≈ 1.5, so the RSI leg alone
- * enters, above the mean. +4% target: $95.16.
+ * enters, above the mean. +7% target: $97.91 (v35; was $95.16 at +4%).
  */
 const aboveMeanRsiCloses = [
   ...flat(55, 220),
@@ -608,7 +609,7 @@ async function main(): Promise<void> {
   console.log("— S6: exits —");
   {
     // Mean reversion: shallow dip entered at $98; $100.50 ≥ mean20
-    // $99.95 but < entry × 1.04 ($101.92) isolates the reversion leg.
+    // $99.95 but < entry × 1.07 ($104.86) isolates the reversion leg.
     const s = boot({
       setup: (b) => {
         b.dailyBars.set("SPY", barsFromCloses(shallowCloses));
@@ -629,17 +630,26 @@ async function main(): Promise<void> {
       entriesOf(s.statePath).SPY === undefined);
   }
   {
-    // Take profit: z-entry at $90; $93.70 ≥ $93.60 target, below the
-    // $99.25 mean — the +4% leg fires.
+    // Take profit (v35: +7%, was +4%): z-entry at $90. $94.50 is
+    // +5% — under the OLD +4% rule this exited; now it must HOLD
+    // (still below the $99.25 mean, so no reversion leg either).
+    // $96.40 ≥ the $96.30 target — the +7% leg fires.
     const s = bootZEntry();
     await until("z entry", () => s.broker.createdOrders.length === 1);
-    s.broker.latestPrices.set("SPY", 93.7);
+    s.broker.latestPrices.set("SPY", 94.5);
+    await sleep(450);
+    check("exit: +5% does NOT take profit under the v35 +7% rule (no close, no sell order)",
+      !s.events.some((e) => e.type === "close") &&
+      !s.broker.createdOrders.some((o) => o.side === "sell") &&
+      entriesOf(s.statePath).SPY?.qty === 22);
+    s.broker.latestPrices.set("SPY", 96.4);
     await until("take-profit close", () =>
       s.events.some((e) => e.type === "close" && e.symbol === "SPY"));
     const close = s.events.find((e) => e.type === "close");
-    check("exit: +4% take profit fires, pnl +$81.40",
-      close?.pnl === 81.4 && close.reason.includes("take profit"),
-      `pnl=${close?.pnl}`);
+    check("exit: +7% take profit fires, pnl +$140.80",
+      close?.pnl === 140.8 && close.reason.includes("take profit") &&
+      close.reason.includes("+7%"),
+      `pnl=${close?.pnl} reason=${close?.reason}`);
   }
   {
     // Stop loss: z-entry at $90; $85.40 ≤ $85.50 stop.
@@ -789,10 +799,10 @@ async function main(): Promise<void> {
     await sleep(300);
     check("reconcile: her own position survives the restart in state",
       entriesOf(statePath).SPY?.qty === 22);
-    s2.broker.latestPrices.set("SPY", 93.7);
+    s2.broker.latestPrices.set("SPY", 96.4);
     await until("post-restart take-profit exit", () =>
       s2.broker.createdOrders.some((o) => o.side === "sell"));
-    check("reconcile: the reconciled position stays exit-managed (+4% sell submitted)",
+    check("reconcile: the reconciled position stays exit-managed (+7% sell submitted)",
       s2.broker.createdOrders.some(
         (o) => o.symbol === "SPY" && o.side === "sell" && o.qty === 22));
   }
@@ -848,7 +858,7 @@ async function main(): Promise<void> {
   console.log("— S13: Phase 6 — entry-side exit gating, re-entry cooldown, legacy state —");
   {
     // RSI(2) entry ABOVE the mean: the position must HOLD through
-    // ticks at/above the mean and exit on +4% — under the old rule
+    // ticks at/above the mean and exit on +7% — under the old rule
     // the first tick at/above the mean closed it (the TSLA churn).
     const s = boot({
       setup: (b) => {
@@ -870,19 +880,19 @@ async function main(): Promise<void> {
       Math.abs((st.entries.SPY?.entryMean ?? 0) - 79.1) < 0.01 &&
       st.entries.SPY?.entryBelowMean === false,
       JSON.stringify(st.entries.SPY));
-    // $95.00 ≥ mean ($79.10) but < the +4% target ($95.16): hold.
+    // $95.00 ≥ mean ($79.10) but < the +7% target ($97.91): hold.
     s.broker.latestPrices.set("SPY", 95);
     await sleep(450);
     check("above-mean: NO mean-reversion exit while price rides above the entry mean",
       !s.events.some((e) => e.type === "close") &&
       !s.broker.createdOrders.some((o) => o.side === "sell") &&
       entriesOf(s.statePath).SPY?.qty === 21);
-    s.broker.latestPrices.set("SPY", 95.3);
+    s.broker.latestPrices.set("SPY", 98.1);
     await until("above-mean take-profit close", () =>
       s.events.some((e) => e.type === "close" && e.symbol === "SPY"));
     const close = s.events.find((e) => e.type === "close");
-    check("above-mean: the position exits on the +4% take profit instead, pnl +$79.80",
-      close?.pnl === 79.8 && close.reason.includes("take profit"),
+    check("above-mean: the position exits on the +7% take profit instead, pnl +$138.60",
+      close?.pnl === 138.6 && close.reason.includes("take profit"),
       `pnl=${close?.pnl} reason=${close?.reason}`);
   }
   {
@@ -966,7 +976,7 @@ async function main(): Promise<void> {
   {
     // Legacy (b): a pre-Phase-6 position entered ABOVE the mean
     // derives entryBelowMean=false; price ≥ mean all day must NOT
-    // churn it out (stop $95.57 / target $104.62 stay untouched).
+    // churn it out (stop $95.57 / target $107.64 stay untouched).
     const s = boot({
       seedState: {
         entries: {

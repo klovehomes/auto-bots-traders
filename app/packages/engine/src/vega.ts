@@ -61,8 +61,13 @@ import {
  * - Orders (D5): limit at mid, one reprice after 60 s at the fresh mid,
  *   then cancel and log. Exits use close-at-market (stops must fill),
  *   triggered off live mids on the 30 s tick: +50% take profit, −35%
- *   stop, 5-trading-day time stop, and a hard force-exit 2 trading
- *   days before expiry.
+ *   stop, and an expiry time stop (v35, Keith 2026-11-19): exit when
+ *   the contract reaches 4 CALENDAR days from expiration. The v35
+ *   rule replaces BOTH the old 5-trading-day time stop and the old
+ *   hard force-exit 2 trading days before expiry — it fires earlier
+ *   than either in every case. (Keith's wording carried a covered
+ *   call/put exception; Vega holds only long calls/puts, so it is
+ *   structurally moot here — covered positions are Wesley's.)
  * - SHADOW MODE (D6): with VEGA_SHADOW=true (the delivered default)
  *   the full pipeline runs — screen, picks, gate verdicts — and emits
  *   decision / order-intent events labelled SHADOW, tracking a shadow
@@ -194,7 +199,8 @@ interface VegaParams {
   maxPositions: number;
   stopLossPct: number;
   takeProfitPct: number;
-  timeStopDays: number;
+  /** v35 time stop: exit when the contract is this many CALENDAR days from expiry. */
+  exitBeforeExpiryDays: number;
   maxDailyLossPct: number;
 }
 
@@ -263,6 +269,14 @@ export function tradingDaysBetween(fromStr: string, toStr: string): number {
     if (dow >= 1 && dow <= 5) count += 1;
   }
   return sign * count;
+}
+
+/** Plain calendar days from `fromStr` to `toStr` (negative when to < from). */
+export function calendarDaysBetween(fromStr: string, toStr: string): number {
+  return Math.round(
+    (Date.parse(`${toStr}T12:00:00Z`) - Date.parse(`${fromStr}T12:00:00Z`)) /
+      86_400_000,
+  );
 }
 
 const OCC_RE = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])\d{8}$/;
@@ -396,7 +410,7 @@ export function startVegaTrader(
     maxPositions: leadingNumber(bot.risk.max_positions, 6),
     stopLossPct: leadingNumber(bot.risk.stop_loss_pct, 35),
     takeProfitPct: leadingNumber(bot.risk.take_profit_pct, 50),
-    timeStopDays: leadingNumber(bot.risk.time_stop, 5),
+    exitBeforeExpiryDays: leadingNumber(bot.risk.exit_before_expiry_days, 4),
     maxDailyLossPct: leadingNumber(bot.risk.max_daily_loss_pct, 3),
   };
   const statePath =
@@ -578,7 +592,7 @@ export function startVegaTrader(
     `ATR(${ATR_PERIOD}) ≥ ${ATR_MIN_PCT}% of price, strike ${OTM_TARGET_PCT}% out of the money (nearest listed at-or-beyond), contracts sized so premium ≥ ${money(params.minPremiumDollars)} and ≤ ${params.maxPositionPct}% of book, expiry ${EXPIRY_MIN_DAYS}–${EXPIRY_MAX_DAYS} days, ` +
     `OI ≥ ${OI_MIN.toLocaleString("en-US")}, spread ≤ ${SPREAD_MAX_PCT}% of mid, premium cap ${params.maxPositionPct}% of book, ` +
     `max_positions ${params.maxPositions}, stop ${params.stopLossPct}%, take_profit ${params.takeProfitPct}%, ` +
-    `time_stop ${params.timeStopDays} trading days, daily_loss_cap ${params.maxDailyLossPct}%, earnings guard ${EARNINGS_GUARD_DAYS} days`;
+    `time_stop: exit at ${params.exitBeforeExpiryDays} calendar days to expiry, daily_loss_cap ${params.maxDailyLossPct}%, earnings guard ${EARNINGS_GUARD_DAYS} days`;
 
   let haltCancelHandled = false;
   let booted = false;
@@ -973,8 +987,9 @@ export function startVegaTrader(
       if (!snap || snap.mid === null || pos.entryPremium <= 0) continue;
       const mid = snap.mid;
       const gainPct = ((mid - pos.entryPremium) / pos.entryPremium) * 100;
-      const daysHeld = tradingDaysBetween(pos.entryDate, today);
-      const daysToExpiry = tradingDaysBetween(today, pos.expiry);
+      // v35: the time stop runs off the expiry date (calendar days),
+      // never off how long the position has been held.
+      const daysToExpiry = calendarDaysBetween(today, pos.expiry);
       let trigger: string | null = null;
       let why = "";
       if (mid >= pos.entryPremium * (1 + params.takeProfitPct / 100)) {
@@ -987,12 +1002,9 @@ export function startVegaTrader(
         why =
           `mid ${money(mid)} is ${gainPct.toFixed(1)}% under entry premium ${money(pos.entryPremium)} ` +
           `(limit ${money(pos.entryPremium * (1 - params.stopLossPct / 100))})`;
-      } else if (daysHeld >= params.timeStopDays) {
-        trigger = `time stop (${params.timeStopDays} trading days)`;
-        why = `held ${daysHeld} trading days since ${pos.entryDate} at mid ${money(mid)} (${gainPct.toFixed(1)}% vs entry ${money(pos.entryPremium)}) — neither target hit`;
-      } else if (daysToExpiry <= 2) {
-        trigger = "expiry guardrail (2 trading days before expiry)";
-        why = `${symbol} expires ${pos.expiry} — ${daysToExpiry} trading day(s) left; force-exit so nothing rides into expiration`;
+      } else if (daysToExpiry <= params.exitBeforeExpiryDays) {
+        trigger = `time stop (${params.exitBeforeExpiryDays} calendar days to expiry)`;
+        why = `${symbol} expires ${pos.expiry} — ${daysToExpiry} calendar day(s) left; exit ahead of expiration at mid ${money(mid)} (${gainPct.toFixed(1)}% vs entry premium ${money(pos.entryPremium)}, entered ${pos.entryDate}) — neither target hit`;
       }
       if (trigger !== null) {
         await submitExit(
@@ -1461,8 +1473,10 @@ export function startVegaTrader(
           optionType: occ.optionType,
           qty: pos.qty,
           entryPremium: pos.avgEntryPrice,
-          // Entry date unknown for adopted positions: the time stop
-          // counts from adoption (logged, never hidden).
+          // Entry date unknown for adopted positions: recorded as
+          // the adoption date (logged, never hidden). Since v35 the
+          // time stop runs off the contract's expiry, so this date
+          // no longer affects exit timing.
           entryDate: etDate(now()),
           expiry: occ.expiry,
           decisionId: "reconciled",
@@ -1474,7 +1488,7 @@ export function startVegaTrader(
           qty: pos.qty,
           price: round2(pos.avgEntryPrice),
           pnl: null,
-          reason: `PAPER · contract position reconciled at engine start — ${pos.qty} contract(s) held @ avg entry ${money(pos.avgEntryPrice)} (opened before this engine session; time stop counts from today)`,
+          reason: `PAPER · contract position reconciled at engine start — ${pos.qty} contract(s) held @ avg entry ${money(pos.avgEntryPrice)} (opened before this engine session; expiry ${occ.expiry} taken from the contract symbol)`,
         });
       }
     }

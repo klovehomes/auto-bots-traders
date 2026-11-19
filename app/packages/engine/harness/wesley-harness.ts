@@ -14,6 +14,10 @@
  *      a REJECTED decision and NO order reaches the broker
  *   E. pickWheelContract pure-rule checks (band, delta, OI, spread,
  *      premium floor, cycle choice)
+ *   F. v35 two-tier early exit (Keith 2026-11-19): a position under
+ *      5 days old buys back at 50% of premium; a position 5+ days
+ *      old buys back ONLY at 20% of premium (up ≥80% on the trade)
+ *      — not at 50%, not at 30% — and the 2× defense fires at any age
  *
  * Run: npx tsx harness/wesley-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -365,6 +369,89 @@ function readState(path: string): Record<string, any> {
   await until("gate rejection decision", () => events.some((e) => e.reason.includes("Risk Gate: REJECTED")));
   check("D: daily loss cap named in the verdict", events.some((e) => e.reason.includes("daily loss cap")));
   check("D: no order reached the broker", broker.createdOrders.length === 0);
+}
+
+// ------------------------------------------ F: v35 two-tier early exit
+{
+  const { writeFileSync } = await import("node:fs");
+  const SYM = occ("F", "261211", "P", 11); // exp 2026-12-11, far future
+  const seedShort = (statePath: string, entryDate: string) => {
+    writeFileSync(statePath, JSON.stringify({
+      startCapital: 10000,
+      cash: 10000,
+      realizedTotal: 0,
+      realizedByDay: {},
+      shorts: {
+        [SYM]: {
+          kind: "put", underlying: "F", strike: 11, expiry: "2026-12-11",
+          qty: 1, entryPremium: 0.3, entryDate, decisionId: "wesley-seed",
+        },
+      },
+      shares: {},
+      pending: [],
+      lastEvalDate: null,
+      decisionCounter: 1,
+    }));
+  };
+  const bootSeeded = (entryDate: string, bid: number, ask: number) => {
+    const broker = new FakeBroker();
+    broker.latestPrices.set("F", 12);
+    broker.snapshots.set(SYM, snapshot(SYM, bid, ask, -0.25));
+    const statePath = join(dir, `f-${entryDate}-${bid}.json`);
+    seedShort(statePath, entryDate);
+    const s = scenario(broker, statePath, T0); // Wed 2026-11-04
+    return { broker, ...s };
+  };
+
+  // F1: 3 days old (entered 2026-11-01) — mid at exactly 50% of the
+  // $0.30 collected → young-tier early exit fires.
+  {
+    const { broker, events } = bootSeeded("2026-11-01", 0.145, 0.155);
+    await until("F1 young-tier buy-back order", () =>
+      broker.createdOrders.some((o) => o.side === "buy" && o.symbol === SYM));
+    await until("F1 close booked", () =>
+      events.some((e) => e.type === "close" && e.symbol === SYM));
+    check("F: 3-day-old position exits at mid = 50% of premium (young tier)",
+      events.some((e) => e.type === "close" && e.symbol === SYM) &&
+      events.some((e) => e.type === "signal" && e.symbol === SYM &&
+        e.reason.includes("early exit") && e.reason.includes("50%")),
+      JSON.stringify(events.filter((e) => e.symbol === SYM).map((e) => e.reason)));
+  }
+
+  // F2: 6 days old (entered 2026-10-29) — mid at 50% must NOT exit,
+  // mid at 30% must NOT exit, mid at 20% (up 80%) MUST exit.
+  {
+    const { broker, events } = bootSeeded("2026-10-29", 0.145, 0.155);
+    await sleep(450);
+    check("F: 6-day-old position does NOT exit at mid = 50% of premium",
+      !broker.createdOrders.some((o) => o.side === "buy" && o.symbol === SYM) &&
+      !events.some((e) => e.type === "close"));
+    broker.snapshots.set(SYM, snapshot(SYM, 0.085, 0.095, -0.2)); // mid 0.09 = 30%
+    await sleep(450);
+    check("F: 6-day-old position does NOT exit at mid = 30% of premium",
+      !broker.createdOrders.some((o) => o.side === "buy" && o.symbol === SYM) &&
+      !events.some((e) => e.type === "close"));
+    broker.snapshots.set(SYM, snapshot(SYM, 0.055, 0.065, -0.15)); // mid 0.06 = 20%
+    await until("F2 aged-tier buy-back order", () =>
+      broker.createdOrders.some((o) => o.side === "buy" && o.symbol === SYM));
+    await until("F2 close booked", () =>
+      events.some((e) => e.type === "close" && e.symbol === SYM));
+    check("F: 6-day-old position exits at mid = 20% of premium (up ≥80%, aged tier)",
+      events.some((e) => e.type === "close" && e.symbol === SYM) &&
+      events.some((e) => e.type === "signal" && e.symbol === SYM &&
+        e.reason.includes("early exit") && e.reason.includes("20%") &&
+        e.reason.includes("80%")),
+      JSON.stringify(events.filter((e) => e.symbol === SYM).map((e) => e.reason)));
+  }
+
+  // F3: 6 days old — mid at 2× the premium → defense fires (any age).
+  {
+    const { broker, events } = bootSeeded("2026-10-29", 0.59, 0.61);
+    await until("F3 defense buy-back order", () =>
+      broker.createdOrders.some((o) => o.side === "buy" && o.symbol === SYM && o.type === "market"));
+    check("F: 6-day-old position still defends at 2× premium (market buy-back)",
+      events.some((e) => e.reason.includes("defense") && e.reason.includes("2×")));
+  }
 }
 
 await sleep(50);

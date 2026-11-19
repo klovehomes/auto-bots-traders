@@ -24,7 +24,7 @@ risk:
   max_positions: 6
   stop_loss_pct: 35 (of premium paid — for options, the premium is the risk unit)
   take_profit_pct: 50 (of premium paid)
-  time_stop: exit any contract 5 trading days after entry if neither target is hit
+  exit_before_expiry_days: 4 (calendar days — exit any contract when it reaches 4 days from expiration if neither target is hit; replaces the old 5-trading-day time stop, Keith 2026-11-19)
   max_daily_loss_pct: 3
 viz:
   color: "#f472b6"
@@ -49,7 +49,7 @@ position is defined-risk, and the most I can lose on a contract is the
 premium I paid for it.
 
 Options on wild stocks are expensive and unforgiving, so my exits are
-mechanical: out at +50% of premium, out at −35%, out after five trading
-days regardless, and never a fresh entry into an earnings print. Vega is
+mechanical: out at +50% of premium, out at −35%, out when a contract
+reaches 4 days from expiration, and never a fresh entry into an earnings print. Vega is
 the option Greek that measures sensitivity to volatility itself — I wear
 the name because volatility is not my risk. It is my raw material.

@@ -395,20 +395,21 @@ export function startSimulator(
     const win = pnl >= 0;
     switch (state.bot.codename) {
       case "trendia":
+        // v35: her only exit is the close >4% below the 50DMA.
         return win
-          ? "exit: momentum cooled — RSI(14) overbought, profit locked"
-          : "exit: 8% trailing stop hit / close below 50DMA";
+          ? "exit: close >4% below 50DMA — trend broken, gains banked"
+          : "exit: close >4% below 50DMA — trend broken";
       case "snapback":
         return win
-          ? "exit: price returned to the 20-day mean"
+          ? "exit: price returned to the 20-day mean / +7% target hit"
           : "exit: 5% stop hit / 5-day time stop";
       case "vega":
         return win
           ? "exit: +50% premium target hit"
-          : "exit: -35% premium stop / 5-day time stop";
+          : "exit: -35% premium stop / expiry time stop (DTE ≤ 4)";
       case "wesley":
         return win
-          ? "exit: bought back at ~50% of premium — redeploy"
+          ? "exit: bought back early at the age-tiered target — redeploy"
           : "exit: defended at 2x premium — rolled out";
       case "polycrypt9000":
         return pos.kind === "prob"

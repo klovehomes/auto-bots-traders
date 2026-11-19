@@ -12,7 +12,7 @@ schedule: evaluate hourly during market hours
 rules:
   trend_filter: only buy dips when price is above the 200DMA (uptrend intact)
   entry: z-score below -2.0 on the 20-day mean, or RSI(2) below 10, or a confirmed homing pigeon — two black daily candles, the second small body inside the long first body, second close below its 10-day average, confirmed by the next candle closing above the second candle's close (live only on the trading day after the confirmation closes)
-  exit: price returns to the 20-day mean, or +4%, or 5 trading days max hold
+  exit: price returns to the 20-day mean, or +7%, or 5 trading days max hold
 risk:
   max_position_pct: 20
   min_notional: 95 (minimum purchase size per position)

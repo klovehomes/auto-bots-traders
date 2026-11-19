@@ -44,7 +44,11 @@ import { addDays, parseOccSymbol } from "./vega.js";
  *   premium lands in cash at fill, assignment converts reserved cash
  *   into shares at the strike, called-away converts shares back to
  *   cash at the strike. Nothing naked, ever.
- * - Early exit: buy back at 50% of the premium collected and redeploy.
+ * - Early exit (v35 two-tier, Keith 2026-11-19): a position entered
+ *   less than 5 days ago is bought back at 50% of the premium
+ *   collected; a position 5 or more days old is bought back only
+ *   when he is up at least 80% on the trade (mid at or below 20% of
+ *   the premium collected) — otherwise it rides to expiry/settlement.
  *   Defense: buy back at 2× the premium collected (the .md's "or roll
  *   it out" alternative is not implemented — the buy-back leg is).
  * - Expiry settlement: at/after expiry the broker is the source of
@@ -83,7 +87,16 @@ const WEEKLY_MIN_DAYS = 4;
 const WEEKLY_MAX_DAYS = 12;
 const MONTHLY_MIN_DAYS = 28;
 const MONTHLY_MAX_DAYS = 45;
+/** Early exit, young tier: buy back at this fraction of premium collected. */
 const EARLY_EXIT_FRACTION = 0.5;
+/**
+ * Early exit, aged tier (v35, Keith 2026-11-19): once a position is
+ * EARLY_EXIT_AGE_DAYS or more old, buy back ONLY when he is up at
+ * least 80% on the trade — the mid at or below this fraction (0.20)
+ * of the premium collected.
+ */
+const EARLY_EXIT_FRACTION_AGED = 0.2;
+const EARLY_EXIT_AGE_DAYS = 5;
 const DEFENSE_MULTIPLE = 2;
 const REPRICE_AFTER_MS = 60_000;
 const DAILY_BARS_LOOKBACK_DAYS = 60;
@@ -386,7 +399,7 @@ export function startWesleyTrader(
     `params snapshot: underlyings $${params.priceMin}–$${params.priceMax}, strikes ${OTM_MIN_PCT}–${OTM_MAX_PCT}% OTM, ` +
     `delta ${DELTA_MIN}–${DELTA_MAX}, OI ≥ ${OI_MIN}, spread ≤ ${SPREAD_MAX_PCT}% of mid, premium floor ${PREMIUM_FLOOR_PCT}%, ` +
     `weekly ${WEEKLY_MIN_DAYS}–${WEEKLY_MAX_DAYS}d / monthly ${MONTHLY_MIN_DAYS}–${MONTHLY_MAX_DAYS}d cycles, ` +
-    `early exit at ${EARLY_EXIT_FRACTION * 100}% of premium, defense at ${DEFENSE_MULTIPLE}× premium, ` +
+    `early exit at ${EARLY_EXIT_FRACTION * 100}% of premium (under ${EARLY_EXIT_AGE_DAYS} days old) / ${EARLY_EXIT_FRACTION_AGED * 100}% of premium (${EARLY_EXIT_AGE_DAYS}+ days old, up ≥80%), defense at ${DEFENSE_MULTIPLE}× premium, ` +
     `max_positions ${params.maxPositions}, max_position ${params.maxPositionPct}%, daily_loss_cap ${params.maxDailyLossPct}%`;
 
   let haltCancelHandled = false;
@@ -752,7 +765,7 @@ export function startWesleyTrader(
     save();
   }
 
-  /** Early-exit (50%) and defense (2×) checks against live mids. */
+  /** Early-exit (two-tier by age, v35) and defense (2×) checks against live mids. */
   async function managePositions(): Promise<void> {
     const symbols = Object.keys(state.shorts);
     if (symbols.length === 0) return;
@@ -776,10 +789,32 @@ export function startWesleyTrader(
       const snap = snapshots.get(symbol);
       if (!snap || snap.mid === null || pos.entryPremium <= 0) continue;
       const mid = snap.mid;
-      if (mid <= pos.entryPremium * EARLY_EXIT_FRACTION) {
+      // v35 two-tier early exit: the threshold depends on the
+      // position's age in calendar days since entry. Legacy state
+      // without an entry date is treated as entered today (young
+      // tier) rather than crashing or guessing it is old.
+      const entryDate =
+        typeof pos.entryDate === "string" && pos.entryDate !== ""
+          ? pos.entryDate
+          : today;
+      const ageDays = Math.max(
+        0,
+        Math.round(
+          (Date.parse(`${today}T12:00:00Z`) -
+            Date.parse(`${entryDate}T12:00:00Z`)) /
+            86_400_000,
+        ),
+      );
+      const aged = ageDays >= EARLY_EXIT_AGE_DAYS;
+      const earlyExitFraction = aged
+        ? EARLY_EXIT_FRACTION_AGED
+        : EARLY_EXIT_FRACTION;
+      if (mid <= pos.entryPremium * earlyExitFraction) {
         await submitBuyBack(
           symbol,
-          `early exit — mid ${money(mid)} is at or below 50% of the ${money(pos.entryPremium)} premium collected; bank the rent and redeploy`,
+          aged
+            ? `early exit — mid ${money(mid)} is at or below ${EARLY_EXIT_FRACTION_AGED * 100}% of the ${money(pos.entryPremium)} premium collected — up at least 80% on the trade (position entered ${entryDate}, ${ageDays} days ago; the ${EARLY_EXIT_AGE_DAYS}+-day tier requires the 80% capture); bank the rent and redeploy`
+            : `early exit — mid ${money(mid)} is at or below ${EARLY_EXIT_FRACTION * 100}% of the ${money(pos.entryPremium)} premium collected (position entered ${entryDate}, ${ageDays} day(s) ago; under-${EARLY_EXIT_AGE_DAYS}-day tier); bank the rent and redeploy`,
           false,
           mid,
         );
@@ -1239,7 +1274,7 @@ export function startWesleyTrader(
   console.log(
     `[wesley] ${bot.name}: Phase 12 live-paper wheel runner started — universe ${params.universe.join("/")}, ` +
       `book ${money(bookEquity())}, cash ${money(state.cash)} (reserved ${money(reservedCash())}), ` +
-      `daily evaluation in market hours, early-exit ${EARLY_EXIT_FRACTION * 100}% / defense ${DEFENSE_MULTIPLE}× on the fast tick`,
+      `daily evaluation in market hours, early-exit ${EARLY_EXIT_FRACTION * 100}% (<${EARLY_EXIT_AGE_DAYS}d) / ${EARLY_EXIT_FRACTION_AGED * 100}% (${EARLY_EXIT_AGE_DAYS}d+) / defense ${DEFENSE_MULTIPLE}× on the fast tick`,
   );
   void tick();
   setInterval(() => void tick(), tickMs);

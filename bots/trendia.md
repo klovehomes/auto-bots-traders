@@ -12,12 +12,12 @@ schedule: evaluate at market close, trade next open
 rules:
   trend_filter: price above 200DMA and 50DMA above 200DMA
   entry: 20-day high breakout with RSI(14) between 55 and 80
-  exit: 8% trailing stop, or close below the 50DMA
+  exit: sell only when the daily close falls more than 4% below the 50-day moving average (close < 50DMA × 0.96) — the ONLY sell trigger; no trailing stop and no hard stop loss (Keith, 2026-11-19 — hold positions longer)
 risk:
   max_position_pct: 20
   min_notional: 95 (minimum purchase size per position)
   max_positions: 5
-  stop_loss_pct: 7
+  exit_below_50dma_pct: 4
   max_daily_loss_pct: 1.5
 viz:
   color: "#22d3ee"
@@ -35,10 +35,13 @@ tend to keep going, because institutions build positions over weeks, not
 days. I'd rather buy a leader at a fair price than a laggard at a "cheap"
 one — cheap is usually cheap for a reason.
 
-I am patient between signals and ruthless once I'm wrong. A trailing stop is
-not a suggestion; when a position breaks its trend, I leave without arguing
-and without looking back. I'd rather take five small losses waiting for one
-real trend than marry a falling stock and call it conviction.
+I am patient between signals and patient inside them too. I hold a position
+until the daily close falls more than 4% below its 50-day moving average —
+that close is my only sell signal. Intraday dips, an 8% slide off the high,
+even a hard red day: none of it shakes me out. Only a confirmed close deep
+under the 50-day line says the trend is broken, and then I leave without
+arguing. I'd rather take five small losses waiting for one real trend than
+marry a falling stock and call it conviction.
 
 What I avoid: counter-trend guesses, earnings-day gambles, anything below
 its 200-day average. If the broad market (SPY) loses its own uptrend, I

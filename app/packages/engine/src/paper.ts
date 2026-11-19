@@ -23,8 +23,13 @@ import { priorHigh, rsiWilder, sma, type DailyBar } from "./indicators.js";
  *
  * - Daily bars from Alpaca → Trendia's .md rules, computed exactly as
  *   written: trend filter (price > 200DMA, 50DMA > 200DMA), entry on a
- *   20-day high breakout with RSI(14) in 55–80, exits on a 7% stop loss,
- *   an 8% trailing stop, or a close below the 50DMA. SPY losing its own
+ *   20-day high breakout with RSI(14) in 55–80, and ONE exit (v35,
+ *   Keith 2026-11-19 — hold positions longer): sell when the daily
+ *   close falls more than 4% below the 50DMA (close < 50DMA × 0.96),
+ *   evaluated on completed daily closes in the daily evaluation. The
+ *   pre-v35 exits — a 7% hard stop loss and an 8% trailing stop,
+ *   checked intraday on live prices — are GONE, as is the old
+ *   close-below-the-50DMA exit this rule replaces. SPY losing its own
  *   uptrend blocks new entries ("cash is a position" — her philosophy).
  * - Every entry/exit decision is written as a full decision record on the
  *   event stream: trigger text, indicator values at signal time, a
@@ -42,9 +47,12 @@ import { priorHigh, rsiWilder, sma, type DailyBar } from "./indicators.js";
  * - Schedule per the .md: evaluate on completed daily bars, entries fill
  *   at the next market open (time_in_force "opg").
  *
- * Durable state (peaks, entries, pending orders, realized PnL, decision
+ * Durable state (entries, pending orders, realized PnL, decision
  * counter) persists to PAPER_STATE_PATH so restarts reconcile against
- * the broker instead of forgetting open positions.
+ * the broker instead of forgetting open positions. State files written
+ * before v35 carry a per-entry `peak` field (the removed trailing
+ * stop's high-water mark); it is ignored on load and dropped the next
+ * time the entry is written.
  */
 
 /**
@@ -55,7 +63,6 @@ import { priorHigh, rsiWilder, sma, type DailyBar } from "./indicators.js";
 const STARTING_CAPITAL = 10000;
 /** The only starting capital before 2026-11-03 — reads pre-doubling state files. */
 const LEGACY_STARTING_CAPITAL = 5000;
-const TRAILING_STOP_PCT = 8; // rules.exit prose in trendia.md
 /** Tick cadence; overridable for tests (PAPER_TICK_MS). */
 const TICK_MS = Number(process.env.PAPER_TICK_MS ?? 30_000) || 30_000;
 const BARS_LOOKBACK_DAYS = 420;
@@ -78,7 +85,6 @@ export interface PaperControl {
 interface TrackedEntry {
   qty: number;
   entryPrice: number;
-  peak: number;
   decisionId: string;
 }
 
@@ -117,7 +123,8 @@ interface TrendiaParams {
   /** Minimum purchase size per position (Keith, 2026-11-14); qty is sized up to reach it. */
   minNotional: number;
   maxPositions: number;
-  stopLossPct: number;
+  /** v35 sole exit: sell on a daily close more than this % below the 50DMA. */
+  exitBelow50dmaPct: number;
   maxDailyLossPct: number;
   universe: string[];
 }
@@ -165,7 +172,7 @@ export function startPaperTrader(
     maxPositionPct: numericOr(bot.risk.max_position_pct, 20),
     minNotional: numericOr(bot.risk.min_notional, 95),
     maxPositions: numericOr(bot.risk.max_positions, 5),
-    stopLossPct: numericOr(bot.risk.stop_loss_pct, 7),
+    exitBelow50dmaPct: numericOr(bot.risk.exit_below_50dma_pct, 4),
     maxDailyLossPct: numericOr(bot.risk.max_daily_loss_pct, 1.5),
     universe: Array.isArray(bot.universe)
       ? bot.universe.filter((v): v is string => typeof v === "string")
@@ -270,7 +277,7 @@ export function startPaperTrader(
 
   const paramsSnapshot = (): string =>
     `params snapshot: max_position_pct ${params.maxPositionPct}, min_notional ${money(params.minNotional)}, max_positions ${params.maxPositions}, ` +
-    `stop_loss ${params.stopLossPct}%, trailing_stop ${TRAILING_STOP_PCT}%, daily_loss_cap ${params.maxDailyLossPct}%`;
+    `exit_rule: sell only on a daily close more than ${params.exitBelow50dmaPct}% below the 50DMA (close < 50DMA × ${(1 - params.exitBelow50dmaPct / 100).toFixed(2)}), daily_loss_cap ${params.maxDailyLossPct}%`;
 
   let haltCancelHandled = false;
   let booted = false;
@@ -313,7 +320,6 @@ export function startPaperTrader(
         state.entries[p.symbol] = {
           qty: order.filledQty,
           entryPrice: order.filledAvgPrice,
-          peak: order.filledAvgPrice,
           decisionId: p.decisionId,
         };
         state.pendingEntries = state.pendingEntries.filter((x) => x.orderId !== p.orderId);
@@ -386,36 +392,6 @@ export function startPaperTrader(
     return decisionId;
   }
 
-  /** Intraday stop checks against live prices (market hours only). */
-  async function checkStops(): Promise<void> {
-    for (const [symbol, entry] of Object.entries(state.entries)) {
-      if (state.pendingExits.some((p) => p.symbol === symbol)) continue;
-      const price = await client.getLatestPrice(symbol);
-      if (!Number.isFinite(price) || price <= 0) continue;
-      if (price > entry.peak) {
-        entry.peak = price;
-        save();
-      }
-      const stopPrice = entry.entryPrice * (1 - params.stopLossPct / 100);
-      const trailPrice = entry.peak * (1 - TRAILING_STOP_PCT / 100);
-      if (price <= stopPrice) {
-        await submitExit(
-          symbol,
-          `stop loss (${params.stopLossPct}%)`,
-          `PAPER · EXIT — stop loss: ${symbol} @ ${money(price)} is ${(((entry.entryPrice - price) / entry.entryPrice) * 100).toFixed(1)}% below entry ${money(entry.entryPrice)} (limit ${money(stopPrice)}) · Risk Gate: APPROVED (exit) · ${paramsSnapshot()}`,
-          price,
-        );
-      } else if (price <= trailPrice) {
-        await submitExit(
-          symbol,
-          `trailing stop (${TRAILING_STOP_PCT}% from peak ${money(entry.peak)})`,
-          `PAPER · EXIT — trailing stop: ${symbol} @ ${money(price)} is ${(((entry.peak - price) / entry.peak) * 100).toFixed(1)}% below its peak ${money(entry.peak)} since entry ${money(entry.entryPrice)} (trail limit ${money(trailPrice)}) · Risk Gate: APPROVED (exit) · ${paramsSnapshot()}`,
-          price,
-        );
-      }
-    }
-  }
-
   /** The daily signal evaluation on completed bars. */
   async function evaluate(): Promise<void> {
     const startISO = new Date(Date.now() - BARS_LOOKBACK_DAYS * 86_400_000).toISOString();
@@ -447,13 +423,19 @@ export function startPaperTrader(
       const sma50 = sma(closes, 50);
       const sma200 = sma(closes, 200);
 
-      // Held? The only daily-bar exit: close below the 50DMA.
+      // Held? The ONLY exit (v35): the daily close fell more than
+      // exitBelow50dmaPct% below the 50DMA. Close-based, evaluated
+      // here on completed bars like everything else in this pass —
+      // intraday dips never trigger it.
       if (held.has(symbol) && state.entries[symbol]) {
-        if (sma50 !== null && last.close < sma50) {
+        const exitLine =
+          sma50 !== null ? sma50 * (1 - params.exitBelow50dmaPct / 100) : null;
+        if (exitLine !== null && last.close < exitLine) {
+          const pctBelow = (((sma50! - last.close) / sma50!) * 100).toFixed(1);
           await submitExit(
             symbol,
-            "close below the 50DMA (trend broken)",
-            `PAPER · EXIT — ${symbol} closed @ ${money(last.close)}, below its 50DMA ${money(sma50)} — trend broken · entry ${money(state.entries[symbol]!.entryPrice)} · Risk Gate: APPROVED (exit) · ${paramsSnapshot()}`,
+            `close more than ${params.exitBelow50dmaPct}% below the 50DMA (trend broken)`,
+            `PAPER · EXIT — ${symbol} closed @ ${money(last.close)}, ${pctBelow}% below its 50DMA ${money(sma50!)} (exit line ${money(exitLine)} = 50DMA × ${(1 - params.exitBelow50dmaPct / 100).toFixed(2)}) — trend broken · entry ${money(state.entries[symbol]!.entryPrice)} · Risk Gate: APPROVED (exit) · ${paramsSnapshot()}`,
             last.close,
           );
         } else {
@@ -678,9 +660,6 @@ export function startPaperTrader(
         booted = true;
         await reconcile();
       }
-
-      const clock = await client.getClock();
-      if (clock.isOpen) await checkStops();
 
       // Daily evaluation: once per ET date — after the close, or as a
       // catch-up when the engine was down (older completed bars are
