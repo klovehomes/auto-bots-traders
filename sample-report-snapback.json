@@ -1,0 +1,207 @@
+{
+  "sampleData": "SYNTHETIC SAMPLE DATA — generated from the v34 test harness fixtures. Not real trading history.",
+  "bot": "snapback",
+  "botLabel": "Snapback",
+  "generatedAt": "2026-11-19T09:03:20.814Z",
+  "timeframe": {
+    "from": "2026-11-01T00:00:00Z",
+    "to": "2026-11-30T23:59:59Z"
+  },
+  "generatorVersion": "v34",
+  "metrics": {
+    "totalGains": 150,
+    "totalLosses": -50,
+    "netGain": 100,
+    "gainLossRatioPct": 75,
+    "profitFactor": 3,
+    "wins": 3,
+    "losses": 1,
+    "breakevens": 0,
+    "winRatePct": 75,
+    "avgWin": 50,
+    "avgLoss": -50,
+    "largestWin": 100,
+    "largestLoss": -50,
+    "expectancyPerTrade": 25,
+    "opens": 4,
+    "closes": 4,
+    "maxDrawdownUsd": 50,
+    "maxDrawdownPct": null,
+    "netPnlPct": null,
+    "startingEquityUsd": null
+  },
+  "trades": [
+    {
+      "symbol": "AAPL",
+      "entryTs": "2026-11-02T14:01:00Z",
+      "exitTs": "2026-11-03T14:01:00Z",
+      "entryPrice": 100,
+      "exitPrice": 110,
+      "qty": 10,
+      "pnl": 100,
+      "holdHours": 24,
+      "exitReason": "mean reversion target",
+      "decisionId": "snapback-1",
+      "entryKnown": true
+    },
+    {
+      "symbol": "XYZ",
+      "entryTs": "2026-11-04T14:00:00Z",
+      "exitTs": "2026-11-06T14:00:00Z",
+      "entryPrice": 10,
+      "exitPrice": 15,
+      "qty": 5,
+      "pnl": 25,
+      "holdHours": 48,
+      "exitReason": "take profit",
+      "decisionId": "snapback-3",
+      "entryKnown": true
+    },
+    {
+      "symbol": "TSLA",
+      "entryTs": null,
+      "exitTs": "2026-11-07T14:00:00Z",
+      "entryPrice": null,
+      "exitPrice": 250,
+      "qty": 3,
+      "pnl": 25,
+      "holdHours": null,
+      "exitReason": "time exit",
+      "decisionId": "snapback-4",
+      "entryKnown": false
+    },
+    {
+      "symbol": "MSFT",
+      "entryTs": "2026-11-08T14:00:00Z",
+      "exitTs": "2026-11-09T14:00:00Z",
+      "entryPrice": 200,
+      "exitPrice": 195,
+      "qty": 10,
+      "pnl": -50,
+      "holdHours": 24,
+      "exitReason": "stop loss",
+      "decisionId": "snapback-5",
+      "entryKnown": true
+    }
+  ],
+  "openPositions": [
+    {
+      "symbol": "XYZ",
+      "entryTs": "2026-11-05T14:00:00Z",
+      "entryPrice": 20,
+      "qty": 5
+    }
+  ],
+  "perSymbol": [
+    {
+      "symbol": "AAPL",
+      "trades": 1,
+      "wins": 1,
+      "netPnl": 100,
+      "winRatePct": 100
+    },
+    {
+      "symbol": "MSFT",
+      "trades": 1,
+      "wins": 0,
+      "netPnl": -50,
+      "winRatePct": 0
+    },
+    {
+      "symbol": "TSLA",
+      "trades": 1,
+      "wins": 1,
+      "netPnl": 25,
+      "winRatePct": 100
+    },
+    {
+      "symbol": "XYZ",
+      "trades": 1,
+      "wins": 1,
+      "netPnl": 25,
+      "winRatePct": 100
+    }
+  ],
+  "perDay": [
+    {
+      "date": "2026-11-03",
+      "closes": 1,
+      "pnl": 100
+    },
+    {
+      "date": "2026-11-06",
+      "closes": 1,
+      "pnl": 25
+    },
+    {
+      "date": "2026-11-07",
+      "closes": 1,
+      "pnl": 25
+    },
+    {
+      "date": "2026-11-09",
+      "closes": 1,
+      "pnl": -50
+    }
+  ],
+  "decisions": {
+    "signals": 3,
+    "approved": 2,
+    "rejected": 1,
+    "topRejectionReasons": [
+      {
+        "reason": "daily loss cap reached",
+        "count": 1
+      }
+    ]
+  },
+  "exitReasons": [
+    {
+      "reason": "mean reversion target",
+      "count": 1
+    },
+    {
+      "reason": "stop loss",
+      "count": 1
+    },
+    {
+      "reason": "take profit",
+      "count": 1
+    },
+    {
+      "reason": "time exit",
+      "count": 1
+    }
+  ],
+  "paramsSnapshotFirst": "z_entry=-2.0, rsi2_entry=10, max_position_pct=20",
+  "paramsSnapshotLast": "z_entry=-2.2, rsi2_entry=8, max_position_pct=20",
+  "dataClasses": {
+    "protected": 10,
+    "sim": 1
+  },
+  "equityCurve": [
+    {
+      "ts": "2026-11-03T14:01:00Z",
+      "cumulativePnl": 100
+    },
+    {
+      "ts": "2026-11-06T14:00:00Z",
+      "cumulativePnl": 125
+    },
+    {
+      "ts": "2026-11-07T14:00:00Z",
+      "cumulativePnl": 150
+    },
+    {
+      "ts": "2026-11-09T14:00:00Z",
+      "cumulativePnl": 100
+    }
+  ],
+  "caveats": [
+    "Realized PnL only: metrics are computed from close events in the window. Open positions are listed at entry and are NOT marked to market.",
+    "Per-day PnL is keyed by UTC date.",
+    "1 close(s) had no matching open inside the window (position opened earlier) — entry price and hold time are unknown for those trades.",
+    "Window includes sim-class decision data (bare numeric decision ids) — simulator output, not real-runner performance. Check dataClasses before quoting these numbers.",
+    "No starting equity provided — net PnL % and drawdown % are null rather than computed against an invented base."
+  ]
+}

@@ -5,11 +5,14 @@ import { WebSocket } from "ws";
 import {
   fleetEventSchema,
   fleetModeSchema,
+  generateBotReport,
+  generateFleetReports,
   getPaperKeys,
   loadBotFile,
   loadBots,
   marketWeatherSchema,
   parseFleetMode,
+  renderBotReportMarkdown,
   resolveBotsDir,
 } from "@fleet/shared";
 import {
@@ -87,6 +90,42 @@ const RESET_WAIT_MS = 10_000;
  *  after the wait just means the engine is slow to come back, and the
  *  restart still lands. */
 const RESTART_WAIT_MS = 10_000;
+
+/**
+ * Per-bot reports (v34): shared query parsing for GET /reports and
+ * GET /reports/:bot. Accepts from/to ISO dates, or `days` (window
+ * ending now, used only when `from` is absent), and an optional
+ * startingEquity (the equity base for % metrics — never invented).
+ * Returns either the parsed options or a human-readable error.
+ */
+function parseReportParams(q: Record<string, string | undefined>):
+  | { from: string | null; to: string | null; startingEquityUsd: number | null }
+  | { error: string } {
+  let from: string | null = q.from ?? null;
+  const to: string | null = q.to ?? null;
+  if (from !== null && Number.isNaN(Date.parse(from))) {
+    return { error: `invalid 'from' date: ${from}` };
+  }
+  if (to !== null && Number.isNaN(Date.parse(to))) {
+    return { error: `invalid 'to' date: ${to}` };
+  }
+  if (from === null && q.days !== undefined) {
+    const days = Number(q.days);
+    if (!Number.isFinite(days) || days <= 0) {
+      return { error: `invalid 'days': ${q.days} (must be a positive number)` };
+    }
+    from = new Date(Date.now() - days * 86_400_000).toISOString();
+  }
+  let startingEquityUsd: number | null = null;
+  if (q.startingEquity !== undefined) {
+    const n = Number(q.startingEquity);
+    if (!Number.isFinite(n) || n <= 0) {
+      return { error: `invalid 'startingEquity': ${q.startingEquity} (must be a positive number)` };
+    }
+    startingEquityUsd = n;
+  }
+  return { from, to, startingEquityUsd };
+}
 
 async function main(): Promise<void> {
   const app = Fastify({ logger: true });
@@ -636,6 +675,53 @@ async function main(): Promise<void> {
   // to seed the stream/Decisions state before merging live frames.
   // Same trust boundary as the other read endpoints (private network).
   app.get("/events/history", async () => historyStore.snapshot());
+
+  // Per-bot performance reports (v34): the shared generator over the
+  // retained event history. JSON is the canonical AI input; the
+  // single-bot route can render the same numbers as Markdown.
+  app.get<{ Querystring: Record<string, string | undefined> }>(
+    "/reports",
+    async (request, reply) => {
+      const parsed = parseReportParams(request.query);
+      if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
+      const events = historyStore.snapshot().events;
+      let botList = bots.map((b) => b.codename);
+      if (botList.length === 0) {
+        botList = [...new Set(events.map((e) => e.bot))].filter(
+          (b) => b !== "system",
+        );
+      }
+      const reports = generateFleetReports(events, parsed, botList);
+      return {
+        generatedAt: reports[0]?.generatedAt ?? new Date().toISOString(),
+        timeframe: { from: parsed.from, to: parsed.to },
+        reports,
+      };
+    },
+  );
+
+  app.get<{
+    Params: { bot: string };
+    Querystring: Record<string, string | undefined>;
+  }>("/reports/:bot", async (request, reply) => {
+    const parsed = parseReportParams(request.query);
+    if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
+    const events = historyStore.snapshot().events;
+    const known =
+      bots.some((b) => b.codename === request.params.bot) ||
+      events.some((e) => e.bot === request.params.bot);
+    if (!known) return reply.code(404).send({ error: "unknown bot" });
+    const report = generateBotReport(events, {
+      ...parsed,
+      bot: request.params.bot,
+    });
+    if (request.query.format === "md") {
+      return reply
+        .type("text/markdown; charset=utf-8")
+        .send(renderBotReportMarkdown(report));
+    }
+    return report;
+  });
 
   app.get("/events", { websocket: true }, (socket) => {
     clients.add(socket);
