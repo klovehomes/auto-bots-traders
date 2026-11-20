@@ -32,6 +32,18 @@ import { resolve } from "node:path";
  *                            not exist inside the containers)
  *   KALSHI_ENV               must be "demo" (default) — anything else
  *                            is REFUSED in this phase (no production)
+ *   SCHWAB_APP_KEY           Schwab app key for the LIVE venue
+ *                            (developer.schwab.com Trader API app)
+ *   SCHWAB_APP_SECRET        Schwab app secret for the LIVE venue —
+ *                            same presence-only discipline as the
+ *                            Alpaca/Kalshi entries above: the status
+ *                            surface exposes only whether both are
+ *                            present, where the app key came from,
+ *                            and the last 4 characters of the APP KEY
+ *                            (never of the app secret). OAuth tokens
+ *                            are NOT stored here — they live in the
+ *                            separate Schwab token file (see
+ *                            schwab.ts).
  *
  * The environment remains a fallback (the pre-v21 names ALPACA_API_KEY
  * / ALPACA_API_SECRET included), so nothing breaks when the file is
@@ -70,6 +82,7 @@ export interface ProviderKeyStatus {
 export interface KeysStatus {
   keysFile: { path: string; exists: boolean };
   alpaca: ProviderKeyStatus;
+  schwab: ProviderKeyStatus;
   kalshi: ProviderKeyStatus & {
     /** The requested Kalshi environment ("demo" unless overridden). */
     env: string;
@@ -81,6 +94,10 @@ export interface KeysStatus {
 export interface PaperKeys {
   alpacaKeyId: string | null;
   alpacaSecretKey: string | null;
+  /** Schwab LIVE app key; non-null only when the secret resolved too. */
+  schwabAppKey: string | null;
+  /** Schwab LIVE app secret; non-null only when the key resolved too. */
+  schwabAppSecret: string | null;
   kalshiKeyId: string | null;
   /** PEM contents (memory only), or null when unavailable/unreadable. */
   kalshiPrivateKeyPem: string | null;
@@ -247,6 +264,13 @@ export function loadPaperKeys(options: KeysLoaderOptions = {}): PaperKeys {
   const alpacaSecret = resolve(["ALPACA_API_SECRET_KEY", "ALPACA_API_SECRET"]);
   const alpacaLoaded = alpacaId !== null && alpacaSecret !== null;
 
+  // --- Schwab (LIVE venue app credentials, v37). Both must resolve,
+  // mirroring the Alpaca pattern: either one alone is "not loaded"
+  // and neither value is exposed on PaperKeys.
+  const schwabKey = resolve(["SCHWAB_APP_KEY"]);
+  const schwabSecret = resolve(["SCHWAB_APP_SECRET"]);
+  const schwabLoaded = schwabKey !== null && schwabSecret !== null;
+
   // --- Kalshi (demo only in this phase).
   const kalshiEnvHit = resolve(["KALSHI_ENV"]);
   const kalshiEnv = (kalshiEnvHit?.value ?? "demo").trim().toLowerCase();
@@ -309,6 +333,16 @@ export function loadPaperKeys(options: KeysLoaderOptions = {}): PaperKeys {
           ? "no Alpaca paper keys found in the keys file or environment"
           : "Alpaca paper key id and secret must both be present",
     },
+    schwab: {
+      loaded: schwabLoaded,
+      source: schwabLoaded ? (schwabKey?.source ?? "none") : "none",
+      keyIdTail: tail(schwabKey?.value ?? null),
+      detail: schwabLoaded
+        ? null
+        : schwabKey === null && schwabSecret === null
+          ? "no Schwab app key/secret found in the keys file or environment"
+          : "Schwab app key and app secret must both be present",
+    },
     kalshi: {
       loaded: kalshiLoaded,
       source: kalshiLoaded ? (kalshiId?.source ?? "none") : "none",
@@ -329,6 +363,8 @@ export function loadPaperKeys(options: KeysLoaderOptions = {}): PaperKeys {
   return {
     alpacaKeyId: alpacaLoaded ? (alpacaId?.value ?? null) : null,
     alpacaSecretKey: alpacaLoaded ? (alpacaSecret?.value ?? null) : null,
+    schwabAppKey: schwabLoaded ? (schwabKey?.value ?? null) : null,
+    schwabAppSecret: schwabLoaded ? (schwabSecret?.value ?? null) : null,
     kalshiKeyId: kalshiLoaded ? (kalshiId?.value ?? null) : null,
     kalshiPrivateKeyPem: kalshiLoaded ? kalshiPem : null,
     kalshiEnv,
@@ -344,9 +380,14 @@ export function getPaperKeys(): PaperKeys {
   return cached;
 }
 
+/** Drop the cached load so a changed file/env is re-read. */
+export function resetPaperKeysCache(): void {
+  cached = null;
+}
+
 /** Test hook: drop the cached load so a changed file/env is re-read. */
 export function resetPaperKeysCacheForTests(): void {
-  cached = null;
+  resetPaperKeysCache();
 }
 
 /** One-line, secret-free summary for boot logs. */
@@ -357,6 +398,7 @@ export function describeKeysStatus(status: KeysStatus): string {
       : `not loaded — ${p.detail ?? "missing"}`;
   return (
     `alpaca paper: ${fmt(status.alpaca)}; kalshi demo: ${fmt(status.kalshi)}; ` +
+    `schwab live: ${fmt(status.schwab)}; ` +
     `keys file ${status.keysFile.path} ${status.keysFile.exists ? "found" : "not found"}`
   );
 }

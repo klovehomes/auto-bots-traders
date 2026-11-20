@@ -1482,3 +1482,260 @@ body {
   font-size: 12.5px;
   color: #3fb950;
 }
+
+/* ---------- Schwab keys chip + setup wizard (v37) ---------- */
+/* Schwab is the LIVE-money venue. Its chip deliberately breaks the
+   neutral palette: a fixed red outline (Schwab-only) so it can never
+   be mistaken for the paper Alpaca/Kalshi readout above it. All other
+   wizard surfaces reuse the existing dark palette variables/colors
+   (#0d1424 surfaces, #22304a borders, #e6edf3 / #8b98a9 text). */
+.schwab-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.key-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border: 1px solid #22304a;
+  border-radius: 999px;
+  background: rgba(13, 20, 36, 0.65);
+  color: #e6edf3;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.key-chip-schwab {
+  border: 1px solid #d92d20;
+  box-shadow: 0 0 0 1px rgba(217, 45, 32, 0.35);
+}
+
+.live-tag {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #ff7a6e;
+}
+
+.wizard-modal {
+  max-width: 680px;
+}
+
+.wizard-steps {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 16px 0 6px;
+  padding: 0;
+}
+
+.wizard-step {
+  flex: 1 1 21%;
+}
+
+.wizard-step-btn {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #22304a;
+  border-radius: 9px;
+  color: #8b98a9;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.wizard-step-btn:hover {
+  color: #e6edf3;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.wizard-step.done .wizard-step-btn {
+  color: #7ee2a0;
+  border-color: #238636;
+}
+
+.wizard-step.current .wizard-step-btn {
+  color: #ffffff;
+  background: #1f6feb;
+  border-color: #1f6feb;
+}
+
+.wizard-step-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.wizard-body {
+  margin-top: 10px;
+}
+
+.wizard-body h4 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.wizard-list {
+  margin: 8px 0;
+  padding-left: 20px;
+  color: #c9d4e0;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.wizard-list li {
+  margin-bottom: 6px;
+}
+
+.wizard-field {
+  display: block;
+  margin-top: 12px;
+  font-size: 13px;
+  color: #8b98a9;
+}
+
+.wizard-field > span {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.wizard-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #05070f;
+  color: #e6edf3;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.wizard-input:focus {
+  border-color: #2f6feb;
+  outline: none;
+}
+
+.copy-field {
+  display: block;
+  margin-top: 12px;
+  font-size: 13px;
+  color: #8b98a9;
+}
+
+.copy-field-label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 600;
+}
+
+.copy-field-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.copy-field-input {
+  flex: 1;
+  min-width: 0;
+  background: #05070f;
+  color: #e6edf3;
+  border: 1px solid #22304a;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.warning-box {
+  border: 1px solid #d92d20;
+  background: rgba(217, 45, 32, 0.12);
+  color: #ffb4ab;
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.wizard-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #c9d4e0;
+  cursor: pointer;
+}
+
+.wizard-confirm.inline {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 0;
+}
+
+.wizard-bot-row {
+  border: 1px solid #1b2740;
+  border-radius: 10px;
+  background: rgba(13, 20, 36, 0.6);
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+
+.wizard-bot-main {
+  font-size: 14px;
+}
+
+.wizard-bot-meta {
+  color: #8b98a9;
+  font-size: 13px;
+}
+
+.wizard-bot-reason {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: #f0b429;
+}
+
+.wizard-bot-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.wizard-footer {
+  justify-content: flex-start;
+  border-top: 1px solid #1b2740;
+  padding-top: 14px;
+}
+
+.wizard-footer .btn:last-child {
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .schwab-row {
+    justify-content: flex-end;
+  }
+
+  .wizard-step {
+    flex-basis: 46%;
+  }
+
+  .copy-field-row {
+    flex-wrap: wrap;
+  }
+}

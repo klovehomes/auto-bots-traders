@@ -56,3 +56,25 @@ KALSHI_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----
 # Kalshi environment. This build trades the DEMO venue only:
 # any value other than "demo" is refused at load time.
 KALSHI_ENV=demo
+
+# ── Schwab LIVE app credentials (the live-money venue) ───────────
+# These are LIVE-account app credentials — NOT paper. They come from
+# your app on the Schwab developer portal:
+#   https://developer.schwab.com
+# (Register, request Trader API – Individual access, create an app
+# with callback URL https://127.0.0.1:8182, and wait until the app
+# shows "Ready For Use". The App Key and App Secret are shown there.)
+#
+# The dashboard shows only the last 4 characters of the APP KEY —
+# the app secret and all OAuth tokens are never displayed, logged,
+# or served by the API.
+SCHWAB_APP_KEY=
+SCHWAB_APP_SECRET=
+
+# OAuth tokens are stored SEPARATELY from this file — never paste
+# them in here by hand. After you complete the Schwab setup wizard's
+# OAuth login, the app writes them to its own token file:
+#   TRADERBOT_SCHWAB_TOKEN_FILE (environment variable), or by
+#   default:  ~/traderbot-schwab-tokens.json
+# The refresh token in that file lasts 7 days from authorization;
+# when it expires, re-run the wizard's Schwab login step.

@@ -35,9 +35,13 @@ services:
       WEATHER_STATE_PATH: /data/weather-state.json
       # Phase 12 (v21): the API reads the same keys file as the engine
       # so GET /keys/status can report presence. The file itself is
-      # mounted below (read-only); the default source is /dev/null —
-      # an empty mount — until TRADERBOT_KEYS_FILE is set in .env.
+      # mounted below; the default source is /dev/null — an empty
+      # mount — until TRADERBOT_KEYS_FILE is set in .env.
       KEYS_FILE: /keys/traderbot-keys.txt
+      # v37 (Schwab): OAuth tokens must be writable + persistent
+      # (they refresh), so they live on the fleet-data volume — NOT
+      # in the keys file.
+      TRADERBOT_SCHWAB_TOKEN_FILE: /data/schwab-tokens.json
     volumes:
       # Bot definitions live outside the app image. Writable for the
       # API only (v30): Add Symbols appends one symbol to a bot's
@@ -45,7 +49,11 @@ services:
       # keeps its read-only mount below — it only ever reads them.
       - ../bots:/bots
       - fleet-data:/data
-      - ${TRADERBOT_KEYS_FILE:-/dev/null}:/keys/traderbot-keys.txt:ro
+      # Keys file: writable for the API only (v37) — the Schwab
+      # setup wizard saves the Schwab app key/secret through the API,
+      # mirroring the v30 writable-bots precedent above; the engine
+      # keeps its read-only mount below — it only ever reads it.
+      - ${TRADERBOT_KEYS_FILE:-/dev/null}:/keys/traderbot-keys.txt
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -81,6 +89,10 @@ services:
       # (mounted read-only below from TRADERBOT_KEYS_FILE in .env;
       # /dev/null = empty file until that's set). File beats env.
       KEYS_FILE: /keys/traderbot-keys.txt
+      # v37 (Schwab): OAuth tokens must be writable + persistent
+      # (they refresh), so they live on the fleet-data volume — NOT
+      # in the read-only keys file.
+      TRADERBOT_SCHWAB_TOKEN_FILE: /data/schwab-tokens.json
       # Phase 12: Wesley's wheel state and PolyCrypt9000's sleeve
       # state persist on the shared data volume like the others.
       WESLEY_STATE_PATH: /data/paper-wesley-state.json

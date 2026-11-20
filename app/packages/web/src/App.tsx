@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   BotConfig,
   FleetEvent,
@@ -14,6 +14,7 @@ import {
 import { Leaderboard } from "./Leaderboard.js";
 import { BotAvatar } from "./avatars.js";
 import { BUILD_VERSION } from "./version.js";
+import { SchwabWizard } from "./SchwabWizard.js";
 import {
   computeStats,
   computeTotals,
@@ -110,10 +111,19 @@ export interface ProviderKeyStatus {
   detail: string | null;
 }
 
+export interface SchwabKeyStatus {
+  configured: boolean;
+  last4: string | null;
+  state: "no-key" | "not-authorized" | "authorized" | "expired";
+  refreshDaysLeft: number | null;
+  live: true;
+}
+
 export interface KeysStatus {
   keysFile: { path: string; exists: boolean };
   alpaca: ProviderKeyStatus;
   kalshi: ProviderKeyStatus & { env: string; refused: boolean };
+  schwab: SchwabKeyStatus;
 }
 
 const MODE_LABELS: Record<FleetMode, string> = {
@@ -236,6 +246,10 @@ export function App() {
   const [modeState, setModeState] = useState<ModeState | null>(null);
   // Paper keys readout (Phase 12): presence only, from GET /keys/status.
   const [keysStatus, setKeysStatus] = useState<KeysStatus | null>(null);
+  // Schwab setup wizard (v37): open state lives here so the header
+  // chip/button can launch it (including as the re-login home when the
+  // refresh token has expired).
+  const [schwabWizardOpen, setSchwabWizardOpen] = useState(false);
   // Market weather (v24): the engine's SPY verdict via the API. Drives
   // the dome's particle weather (through weatherRef, read per frame)
   // and the overlay chip on the landscape.
@@ -594,29 +608,30 @@ export function App() {
   // Paper keys status (Phase 12): fetched once on load, refreshed on
   // an interval — flipping keys means editing a file on the host, and
   // the readout should notice without a dashboard reload. Presence
-  // only; the API never serves a secret value.
+  // only; the API never serves a secret value. Factored into a
+  // callable (v37) so the Schwab wizard can trigger an immediate
+  // chip refresh via its onChanged callback after a mutation.
+  const refetchKeysStatus = useCallback((): void => {
+    fetch(`${API_BASE}/keys/status`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<KeysStatus>;
+      })
+      .then((data) => {
+        setKeysStatus(data);
+      })
+      .catch(() => {
+        // Best-effort readout; absence renders as "unknown".
+      });
+  }, []);
+
   useEffect(() => {
-    let cancelled = false;
-    const load = (): void => {
-      fetch(`${API_BASE}/keys/status`)
-        .then((res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json() as Promise<KeysStatus>;
-        })
-        .then((data) => {
-          if (!cancelled) setKeysStatus(data);
-        })
-        .catch(() => {
-          // Best-effort readout; absence renders as "unknown".
-        });
-    };
-    load();
-    const timer = setInterval(load, 60_000);
+    refetchKeysStatus();
+    const timer = setInterval(refetchKeysStatus, 60_000);
     return () => {
-      cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [refetchKeysStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -848,6 +863,28 @@ export function App() {
     pendingMode !== "paper" &&
     (modeState?.running?.mode ?? desiredMode) === "paper";
 
+  // Schwab chip (v37): presence + OAuth state only, from the same
+  // GET /keys/status payload. Schwab is the LIVE-money venue, hence
+  // the red-outlined chip — Alpaca/Kalshi above are paper keys.
+  const schwabStateText =
+    keysStatus === null || !keysStatus.schwab
+      ? "…"
+      : keysStatus.schwab.state === "no-key"
+        ? "no key"
+        : keysStatus.schwab.state === "not-authorized"
+          ? "not authorized"
+          : keysStatus.schwab.state === "authorized"
+            ? keysStatus.schwab.refreshDaysLeft !== null
+              ? `✓ · refresh ${keysStatus.schwab.refreshDaysLeft}d left`
+              : "✓ authorized"
+            : "expired — re-login needed";
+  const schwabButtonLabel =
+    keysStatus?.schwab?.state === "expired"
+      ? "Schwab re-login"
+      : keysStatus?.schwab?.state === "not-authorized"
+        ? "Finish Schwab setup"
+        : "Schwab setup";
+
   return (
     <main className="page">
       <header className="header">
@@ -921,6 +958,21 @@ export function App() {
                   ? `✓${keysStatus.kalshi.source !== "none" ? ` (${keysStatus.kalshi.source})` : ""}`
                   : "✗"}
             </p>
+            <div className="schwab-row">
+              <span
+                className="key-chip key-chip-schwab"
+                title="Schwab is the live-money venue: bots assigned to Schwab trade real funds in a real brokerage account, unlike the Alpaca and Kalshi paper keys above. The red outline is a live-money warning."
+              >
+                Schwab <span className="live-tag">LIVE</span> {schwabStateText}
+              </span>
+              <button
+                type="button"
+                className="btn small"
+                onClick={() => setSchwabWizardOpen(true)}
+              >
+                {schwabButtonLabel}
+              </button>
+            </div>
             {pendingMode && (
               <div
                 className="mode-confirm"
@@ -1560,6 +1612,14 @@ export function App() {
             </p>
           </div>
         </div>
+      )}
+
+      {schwabWizardOpen && (
+        <SchwabWizard
+          apiBase={API_BASE}
+          onClose={() => setSchwabWizardOpen(false)}
+          onChanged={refetchKeysStatus}
+        />
       )}
     </main>
   );

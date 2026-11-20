@@ -11,6 +11,7 @@ import {
   getPaperKeys,
   loadBots,
   resolveBotsDir,
+  schwabPublicStatus,
   type BotConfig,
   type FleetEvent,
 } from "@fleet/shared";
@@ -20,9 +21,14 @@ import { createKalshiClient } from "./kalshi.js";
 import { createModeSupervisor, resolveBootMode } from "./mode.js";
 import { createControlRouter, startPaperTrader } from "./paper.js";
 import { startPolyCryptTrader } from "./polycrypt.js";
+import {
+  createSchwabClientFromKeys,
+  createSchwabExecutionClient,
+} from "./schwab.js";
 import { startSimulator, type SimSpyProbe } from "./sim.js";
 import { startSnapbackTrader } from "./snapback.js";
 import { startVegaTrader } from "./vega.js";
+import { resolveBotVenue } from "./venue.js";
 import { startWeatherService } from "./weather.js";
 import { startWesleyTrader } from "./wesley.js";
 
@@ -222,7 +228,81 @@ async function main(): Promise<void> {
     await checkAlpacaPaperConnection();
     // Weather still reads the paper feed (display only, no orders).
     startWeather(createAlpacaClient());
-    startTestEmitter(active);
+
+    // v37 (Schwab): the guardrail above still covers every bot EXCEPT
+    // a Trendia/Snapback that Keith has individually sent live — the
+    // bot file's broker/mode fields are that per-bot go-live call
+    // (broker: schwab, mode: connected; the fleet MODE here is
+    // connected, so the ceiling allows it). Each such bot is gated by
+    // resolveBotVenue, needs an authorized Schwab connection, and
+    // then runs its real runner with Schwab execution + Alpaca
+    // market data behind the same Risk Gate control router.
+    const router = createControlRouter(control);
+    const liveStarted: string[] = [];
+    const noteConnectedUnavailable = (bot: BotConfig, why: string): void => {
+      void postEvent({
+        bot: bot.name,
+        type: "signal",
+        decision_id: null,
+        symbol: null,
+        side: null,
+        qty: null,
+        price: null,
+        pnl: null,
+        reason: `CONNECTED · NO TRADE — ${why}`,
+        ts: new Date().toISOString(),
+      });
+    };
+    for (const codename of [TRENDIA_CODENAME, SNAPBACK_CODENAME]) {
+      const bot = active.find((b) => b.codename === codename);
+      if (!bot) continue;
+      if ((bot.broker ?? "").trim().toLowerCase() !== "schwab") continue;
+      const resolution = resolveBotVenue(bot, mode);
+      if (!resolution.ok) {
+        noteConnectedUnavailable(
+          bot,
+          resolution.reason ?? "Schwab venue resolution failed for this bot.",
+        );
+        continue;
+      }
+      const schwab = createSchwabClientFromKeys();
+      if (!schwab || schwabPublicStatus().state !== "authorized") {
+        noteConnectedUnavailable(
+          bot,
+          "Schwab is not authorized yet — complete the Schwab setup wizard before this bot can trade live on Schwab.",
+        );
+        continue;
+      }
+      const executionClient = createSchwabExecutionClient({
+        schwab,
+        data: createAlpacaClient(),
+      });
+      if (codename === TRENDIA_CODENAME) {
+        startPaperTrader(
+          bot,
+          executionClient,
+          postEvent,
+          router.forBots([TRENDIA_CODENAME]),
+        );
+      } else {
+        startSnapbackTrader(
+          bot,
+          executionClient,
+          postEvent,
+          router.forBots([SNAPBACK_CODENAME]),
+        );
+      }
+      liveStarted.push(codename);
+      console.log(`[engine] ⚠ ${bot.name} is LIVE on Schwab (CONNECTED)`);
+    }
+    const emitterBots = active.filter((b) => !liveStarted.includes(b.codename));
+    if (emitterBots.length > 0) {
+      startTestEmitter(emitterBots);
+    } else {
+      console.log(
+        "[engine] MODE=connected — every active bot is live on Schwab; the test emitter has no bots left to run for.",
+      );
+    }
     return;
   }
 
@@ -298,6 +378,23 @@ async function main(): Promise<void> {
     for (const [codename, start] of alpacaBots) {
       const bot = byCodename(codename);
       if (!bot) continue;
+      // v37 (Schwab): Trendia/Snapback carry their venue in the bot
+      // file's broker field — Keith's per-bot call. A bot assigned to
+      // Schwab can never be served in paper mode (Schwab is a live
+      // venue and the fleet MODE here is the ceiling), so it does NOT
+      // start on Alpaca: it gets its NO-TRADE record and falls into
+      // the simulator `others` set below, exactly like the
+      // missing-keys path. Vega/Wesley are not venue-checked here.
+      if (codename === TRENDIA_CODENAME || codename === SNAPBACK_CODENAME) {
+        const resolution = resolveBotVenue(bot, mode);
+        if (resolution.venue === "schwab" && !resolution.ok) {
+          notePaperUnavailable(
+            bot,
+            `${resolution.reason ?? "Schwab venue is not available for this bot."} This bot is running on the simulator until its Schwab venue can serve it.`,
+          );
+          continue;
+        }
+      }
       if (alpacaClient) {
         start(bot);
         running.push(codename);

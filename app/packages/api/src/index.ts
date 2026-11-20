@@ -14,6 +14,7 @@ import {
   parseFleetMode,
   renderBotReportMarkdown,
   resolveBotsDir,
+  schwabPublicStatus,
 } from "@fleet/shared";
 import {
   appendCandidate,
@@ -23,6 +24,7 @@ import {
   readCandidates,
   searchAssets,
 } from "./candidates.js";
+import { registerSchwabRoutes } from "./schwab.js";
 import {
   ControlStore,
   type AuditEntry,
@@ -338,12 +340,26 @@ async function main(): Promise<void> {
     }
   });
 
+  // Schwab routes (v37): the setup wizard's save / connect / verify /
+  // test steps and the per-bot venue switch. Registered after the
+  // candidates routes; needs botsDir (fresh bot reads + frontmatter
+  // edits) and the boot `bots` array (refreshed in place on a venue
+  // change, the same discipline as the candidates POST above).
+  registerSchwabRoutes(app, { botsDir, bots });
+
   // Paper-keys status (Phase 12, v21): PRESENCE ONLY. The shared
   // loader's status surface is the whole answer — per-provider loaded
   // flag, where the key id came from, and the key id's last 4 chars.
   // Secret values and the Kalshi PEM never leave the loader; there is
   // deliberately no route that returns them.
-  app.get("/keys/status", async () => getPaperKeys().status);
+  // v37: the response's `schwab` field is the composed public Schwab
+  // status (schwabPublicStatus — key presence PLUS token state and
+  // refresh-token days left), which replaces the loader's
+  // provider-level schwab field in the HTTP response.
+  app.get("/keys/status", async () => ({
+    ...getPaperKeys().status,
+    schwab: schwabPublicStatus(),
+  }));
 
   // Market weather (v24): the engine's latest SPY verdict. Dashboards
   // fetch this on load (before the live socket) and then track the
