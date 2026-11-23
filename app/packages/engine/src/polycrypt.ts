@@ -42,9 +42,9 @@ import {
  *   her Polymarket model probability has no Kalshi equivalent field):
  *   the ANCHOR is the market's last traded YES price — the most recent
  *   consensus print. The edge is how far the executable offer sits
- *   below that anchor: buy YES when anchor − yesAsk ≥ 8 points, buy NO
- *   when (1 − anchor) − noAsk ≥ 8 points. She trades only when the
- *   offer is stale against consensus by her file's 8-point threshold.
+ *   below that anchor: buy YES when anchor − yesAsk ≥ 3 points, buy NO
+ *   when (1 − anchor) − noAsk ≥ 3 points. She trades only when the
+ *   offer is stale against consensus by her file's 3-point threshold.
  *   Skips: markets closing within 24h, no last trade, spread wider
  *   than 15 points (thin/ambiguous), volume under 100 contracts.
  *   Sizing: quarter-Kelly, halved until calibration is proven, exactly
@@ -52,6 +52,20 @@ import {
  *   market, max 10 prediction positions. Exits: the edge closing
  *   (executable bid back within 1 point of the anchor), the market
  *   entering its final hour, or settlement (realized at the result).
+ *
+ *   CARRY trigger (Keith, 2026-11-22): a second, independent way into
+ *   a Kalshi demo position — buy YES when the executable YES offer
+ *   itself sits in the 82–89¢ near-certainty band, the market closes
+ *   within 7 days (the sleeve's 24h minimum still applies), the book
+ *   is tight (spread ≤ 3 points) and volume is high (≥ 1,000
+ *   contracts). There is no model edge at those prices — the offer IS
+ *   the crowd's probability — so carry entries size at the flat
+ *   per-position cap (3% of the book) instead of quarter-Kelly; the
+ *   5%-per-market cap and the 10-position max still bind, and a market
+ *   she already holds is never re-entered. Carry positions ride the
+ *   settlement and final-hour exits; the edge-closed exit does not
+ *   apply to them (there is no mispricing edge to close). Decision
+ *   records name the trigger: MISPRICING vs CARRY.
  *
  * Kill switch: halt cancels her open orders on both venues;
  * kill+liquidate sells the crypto positions (quantity-sized, her
@@ -73,13 +87,18 @@ const ATR_PERIOD = 14;
 const TRAIL_ATR_MULTIPLE = 2;
 const CRYPTO_MAX_POSITION_PCT = 15;
 const CRYPTO_MAX_POSITIONS = 3;
-const EDGE_MIN_POINTS = 8;
+const EDGE_MIN_POINTS = 3;
 const PREDICTION_MAX_POSITION_PCT = 3;
 const PREDICTION_MAX_MARKET_PCT = 5;
 const PREDICTION_MAX_POSITIONS = 10;
 const PREDICTION_MIN_VOLUME = 100;
 const PREDICTION_MAX_SPREAD = 0.15;
 const PREDICTION_MARKETS_FETCH = 200;
+const CARRY_PRICE_MIN = 0.82; // Keith's near-certainty band (2026-11-22)
+const CARRY_PRICE_MAX = 0.89;
+const CARRY_MAX_DAYS_TO_CLOSE = 7;
+const CARRY_MAX_SPREAD = 0.03; // tight book only — far under the mispricing sleeve's 15pt thin-market skip
+const CARRY_MIN_VOLUME = 1000; // "high volume" — 10× the mispricing sleeve's floor
 const KELLY_FRACTION = 0.25; // quarter-Kelly…
 const KELLY_CALIBRATION_HAIRCUT = 0.5; // …halved until calibration is proven
 const COMBINED_DAILY_LOSS_PCT = 2.5;
@@ -115,6 +134,8 @@ interface KalshiPosition {
   entryPrice: number;
   /** Last-traded anchor at entry (dollars, YES terms). */
   anchor: number;
+  /** Which trigger opened the position; absent in pre-carry state = mispricing. */
+  entryKind?: "mispricing" | "carry";
   entryDate: string;
   closeTime: string;
   decisionId: string;
@@ -141,6 +162,7 @@ interface PendingKalshiOrder {
   decisionId: string;
   title: string;
   anchor: number;
+  entryKind?: "mispricing" | "carry";
   closeTime: string;
   trigger: string | null;
   entryPrice: number | null;
@@ -194,7 +216,7 @@ export function brokerCryptoSymbol(pair: string): string {
 /**
  * The mispricing scan, pure for harness testing. Returns the tradable
  * candidates (best edge first) under her file's rules as adapted in
- * the header: 8-point edge vs the last-traded anchor, 24h+ to close,
+ * the header: 3-point edge vs the last-traded anchor, 24h+ to close,
  * spread ≤ 15 points, volume ≥ 100, two-sided quotes required.
  */
 export function scanKalshiEdges(
@@ -253,6 +275,46 @@ export function kalshiOrderSize(
     (PREDICTION_MAX_MARKET_PCT / 100) * bookEquity,
   );
   return Math.floor(Math.min(kellyDollars, capDollars) / price);
+}
+
+/**
+ * The carry scan, pure for harness testing. Keith's second trigger
+ * (2026-11-22): buy YES when the executable YES offer itself sits in
+ * the 82–89¢ near-certainty band, the market closes within 7 days
+ * (and at least 24h out — the sleeve's existing entry floor), the
+ * book is tight (spread ≤ 3 points) and volume is high (≥ 1,000
+ * contracts). Highest volume first — there is no edge to rank by.
+ */
+export function scanKalshiCarry(
+  markets: KalshiMarket[],
+  now: Date,
+): { market: KalshiMarket; price: number }[] {
+  const out: { market: KalshiMarket; price: number }[] = [];
+  const earliest = now.getTime() + 24 * 3_600_000;
+  const latest = now.getTime() + CARRY_MAX_DAYS_TO_CLOSE * 24 * 3_600_000;
+  for (const m of markets) {
+    const closeMs = Date.parse(m.closeTime);
+    if (!Number.isFinite(closeMs) || closeMs < earliest || closeMs > latest) continue;
+    if (m.volume < CARRY_MIN_VOLUME) continue;
+    if (m.yesAsk <= 0 || m.yesBid <= 0) continue;
+    if (m.yesAsk - m.yesBid > CARRY_MAX_SPREAD) continue;
+    if (m.yesAsk < CARRY_PRICE_MIN || m.yesAsk > CARRY_PRICE_MAX) continue;
+    out.push({ market: m, price: m.yesAsk });
+  }
+  return out.sort((a, b) => b.market.volume - a.market.volume);
+}
+
+/**
+ * Carry contract count: no model edge (the offer is the crowd's
+ * probability), so the flat per-position dollar cap — the same
+ * 3%-of-book hard cap that bounds Kelly sizing — with no Kelly
+ * fraction applied. One position per market, so the 5%-per-market
+ * cap sits above this by construction.
+ */
+export function kalshiCarryOrderSize(price: number, bookEquity: number): number {
+  if (price <= 0 || price >= 1) return 0;
+  const capDollars = (PREDICTION_MAX_POSITION_PCT / 100) * bookEquity;
+  return Math.floor(capDollars / price);
 }
 
 export function startPolyCryptTrader(
@@ -379,7 +441,8 @@ export function startPolyCryptTrader(
     `params snapshot: 50/50 sleeves under one cap — crypto: Donchian(${DONCHIAN_PERIOD}) hourly breakout + volume/ATR confirmation, ` +
     `${TRAIL_ATR_MULTIPLE}× ATR(${ATR_PERIOD}) trailing stop, max ${CRYPTO_MAX_POSITION_PCT}% per position, max ${CRYPTO_MAX_POSITIONS} positions; ` +
     `prediction (Kalshi demo): edge ≥ ${EDGE_MIN_POINTS}pts vs last-traded anchor, quarter-Kelly halved, max ${PREDICTION_MAX_POSITION_PCT}% per position / ` +
-    `${PREDICTION_MAX_MARKET_PCT}% per market, max ${PREDICTION_MAX_POSITIONS} positions, skip <24h to close; Polymarket sleeve SHADOW (no paper venue); ` +
+    `${PREDICTION_MAX_MARKET_PCT}% per market, max ${PREDICTION_MAX_POSITIONS} positions, skip <24h to close; ` +
+    `carry: YES ${pct(CARRY_PRICE_MIN)}–${pct(CARRY_PRICE_MAX)} band, closes ≤${CARRY_MAX_DAYS_TO_CLOSE}d, spread ≤${Math.round(CARRY_MAX_SPREAD * 100)}pts, volume ≥${CARRY_MIN_VOLUME.toLocaleString("en-US")}, flat ${PREDICTION_MAX_POSITION_PCT}% cap sizing; Polymarket sleeve SHADOW (no paper venue); ` +
     `combined daily_loss_cap ${COMBINED_DAILY_LOSS_PCT}%`;
 
   let haltCancelHandled = false;
@@ -693,6 +756,7 @@ export function startPolyCryptTrader(
             count: order.filledCount,
             entryPrice: order.price ?? p.price,
             anchor: p.anchor,
+            entryKind: p.entryKind ?? "mispricing",
             entryDate: etDate(now()),
             closeTime: p.closeTime,
             decisionId: p.decisionId,
@@ -705,7 +769,7 @@ export function startPolyCryptTrader(
               qty: order.filledCount,
               price: round2(order.price ?? p.price),
               pnl: null,
-              reason: `PAPER (Kalshi demo) · entry filled — ${order.filledCount} × ${p.side.toUpperCase()} @ ${pct(order.price ?? p.price)} on "${p.title}" (anchor ${pct(p.anchor)})`,
+              reason: `PAPER (Kalshi demo) · entry filled — ${order.filledCount} × ${p.side.toUpperCase()} @ ${pct(order.price ?? p.price)} on "${p.title}" (anchor ${pct(p.anchor)})${p.entryKind === "carry" ? " · CARRY entry (82–89¢ band)" : ""}`,
             },
             p.decisionId,
           );
@@ -788,10 +852,13 @@ export function startPolyCryptTrader(
         pos.side === "yes" ? bid : 1 - bid;
       const anchorGap = Math.abs(bidInAnchorTerms - pos.anchor);
       const msToClose = Date.parse(market.closeTime) - now().getTime();
+      // Carry positions have no mispricing edge to close, so the
+      // edge-closed exit applies to mispricing entries only; the
+      // settlement and final-hour exits above/below apply to both.
       let trigger: string | null = null;
       if (msToClose <= 3_600_000) {
         trigger = `final hour before close (${market.closeTime}) — exit at the bid rather than ride settlement variance`;
-      } else if (anchorGap <= 0.01) {
+      } else if (pos.entryKind !== "carry" && anchorGap <= 0.01) {
         trigger = `edge closed — executable bid ${pct(bid)} is back within 1pt of the ${pct(pos.anchor)} anchor the position was bought against`;
       }
       if (trigger === null) continue;
@@ -829,7 +896,7 @@ export function startPolyCryptTrader(
     }
   }
 
-  /** The 30-minute mispricing scan (Kalshi demo expression of her Polymarket rules). */
+  /** The 30-minute prediction scan: mispricing edges first, then the carry trigger (Kalshi demo expression of her Polymarket rules). */
   async function scanKalshi(): Promise<void> {
     // Polymarket shadow bookkeeping: one explicit record per day that
     // the sleeve placed NO orders — there is no paper venue, and this
@@ -945,6 +1012,7 @@ export function startPolyCryptTrader(
         decisionId,
         title: market.title,
         anchor,
+        entryKind: "mispricing",
         closeTime: market.closeTime,
         trigger: null,
         entryPrice: null,
@@ -952,8 +1020,85 @@ export function startPolyCryptTrader(
       entered += 1;
       save();
     }
+
+    // Carry trigger (Keith, 2026-11-22): near-certainty YES in the
+    // 82–89¢ band. Runs after mispricing — a market entered above is
+    // pending now, so the held/pending skips keep her to one position
+    // per market across both triggers.
+    const carryCandidates = scanKalshiCarry(markets, now());
+    let carryEntered = 0;
+    for (const cand of carryCandidates) {
+      const { market, price } = cand;
+      if (state.kalshi[market.ticker]) continue;
+      if (state.pendingKalshi.some((p) => p.ticker === market.ticker)) continue;
+      const openCount =
+        Object.keys(state.kalshi).length +
+        state.pendingKalshi.filter((p) => p.kind === "entry").length;
+      const count = kalshiCarryOrderSize(price, bookEquity());
+      let verdict: string | null = null;
+      if (dailyCapHit()) {
+        verdict = `combined daily loss cap hit — realized ${money(realizedToday())} today vs cap ${money(-((COMBINED_DAILY_LOSS_PCT / 100) * state.startCapital))} (both sleeves, one cap)`;
+      } else if (openCount >= PREDICTION_MAX_POSITIONS) {
+        verdict = `max prediction positions reached (${openCount}/${PREDICTION_MAX_POSITIONS})`;
+      } else if (count < 1) {
+        verdict = `flat ${PREDICTION_MAX_POSITION_PCT}%-of-book cap sizing rounds below one contract at ${pct(price)} (book ${money(bookEquity())})`;
+      }
+      const daysToClose =
+        (Date.parse(market.closeTime) - now().getTime()) / 86_400_000;
+      const signalText =
+        `"${market.title}" — YES offered @ ${pct(price)}, inside her carry band (${pct(CARRY_PRICE_MIN)}–${pct(CARRY_PRICE_MAX)}); ` +
+        `tight book (spread ${Math.round((market.yesAsk - market.yesBid) * 100)}pts ≤ ${Math.round(CARRY_MAX_SPREAD * 100)}pt cap), ` +
+        `volume ${Math.round(market.volume).toLocaleString("en-US")} (floor ${CARRY_MIN_VOLUME.toLocaleString("en-US")}), closes in ${daysToClose.toFixed(1)}d (window 24h–${CARRY_MAX_DAYS_TO_CLOSE}d)`;
+      if (verdict !== null) {
+        emit({
+          type: "signal",
+          symbol: market.ticker,
+          side: "buy",
+          qty: Math.max(count, 0),
+          price: round2(price),
+          pnl: null,
+          reason: `PAPER (Kalshi demo) · CARRY signal — ${signalText} · Risk Gate: REJECTED — ${verdict} · ${paramsSnapshot()}`,
+        });
+        continue;
+      }
+      const decisionId = emit({
+        type: "signal",
+        symbol: market.ticker,
+        side: "buy",
+        qty: count,
+        price: round2(price),
+        pnl: null,
+        reason:
+          `PAPER (Kalshi demo) · CARRY signal — ${signalText} · Risk Gate: APPROVED — flat per-position cap sizing (no model edge at band prices) → ${count} contract(s) ≈ ${money(count * price)} ` +
+          `(caps: ${PREDICTION_MAX_POSITION_PCT}% of book per position); positions ${openCount}/${PREDICTION_MAX_POSITIONS} · ${paramsSnapshot()} · order: limit buy at the offer`,
+      });
+      const order = await kalshi.createOrder({
+        ticker: market.ticker,
+        side: "yes",
+        action: "buy",
+        count,
+        price,
+      });
+      state.pendingKalshi.push({
+        orderId: order.id,
+        ticker: market.ticker,
+        kind: "entry",
+        side: "yes",
+        count,
+        price,
+        decisionId,
+        title: market.title,
+        anchor: market.lastPrice ?? price,
+        entryKind: "carry",
+        closeTime: market.closeTime,
+        trigger: null,
+        entryPrice: null,
+      });
+      carryEntered += 1;
+      save();
+    }
     console.log(
-      `[polycrypt] ${bot.name}: Kalshi scan complete (PAPER) — ${markets.length} markets fetched, ${candidates.length} edge candidates, ${entered} entries submitted; prediction positions ${Object.keys(state.kalshi).length}/${PREDICTION_MAX_POSITIONS}; kalshi sleeve ${money(sleeveEquity("kalshi"))}`,
+      `[polycrypt] ${bot.name}: Kalshi scan complete (PAPER) — ${markets.length} markets fetched, ${candidates.length} edge candidates, ${entered} entries submitted; ${carryCandidates.length} carry candidates, ${carryEntered} carry entries submitted; prediction positions ${Object.keys(state.kalshi).length}/${PREDICTION_MAX_POSITIONS}; kalshi sleeve ${money(sleeveEquity("kalshi"))}`,
     );
   }
 
