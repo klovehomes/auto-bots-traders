@@ -11,7 +11,7 @@ timeframe: 1Hour
 schedule: 24/7 — Polymarket sleeve scans every 30 minutes, crypto sleeve evaluates hourly
 rules:
   capital_split: 50% Polymarket sleeve / 50% crypto sleeve, rebalanced monthly; each sleeve keeps its own sub-ledger
-  polymarket_sleeve: trade only when the market price differs from the model probability by 8+ points; quarter-Kelly sizing, halved until calibration is proven; skip markets resolving within 24h or with ambiguous rules
+  polymarket_sleeve: trade only when the market price differs from the model probability by 3+ points; quarter-Kelly sizing, halved until calibration is proven; skip markets resolving within 24h or with ambiguous rules; carry trigger (on the Kalshi demo venue) — buy YES at 82–89¢ when the book is tight (spread ≤ 3 points), volume is high (1,000+ contracts) and the market closes within 7 days, sized at the flat 3% per-position cap, held to settlement
   crypto_sleeve: 20-period Donchian breakout on hourly bars, confirmed by volume and ATR expansion; 2x ATR trailing stop; long or flat, never short
 risk:
   max_position_pct: 3 (per Polymarket position) / 15 (per crypto position)
@@ -33,9 +33,12 @@ discipline.
 
 The Polymarket sleeve is a bookmaker's critic. It builds its own
 probability for an event, compares it to the crowd's price, and only acts
-on an 8-point disagreement or better — small, quarter-Kelly, and in shadow
+on a 3-point disagreement or better — small, quarter-Kelly, and in shadow
 mode until its calibration is proven on paper, because Polymarket offers
-no testnet to practice on. The crypto sleeve is a breakout machine:
+no testnet to practice on. Practicing on the Kalshi demo venue, it also
+runs a carry trigger: near-certainty YES at 82–89¢ on tight, high-volume
+markets closing within 7 days, sized flat at the per-position cap and
+held to settlement. The crypto sleeve is a breakout machine:
 BTC, ETH, SOL, and XRP on hourly bars, entering only when price breaks the
 20-period channel with volume and volatility expanding behind it, riding
 a 2x ATR trailing stop, never short.

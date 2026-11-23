@@ -20,6 +20,12 @@
  *   6. reconcile: an untracked broker crypto position is foreign —
  *      never adopted, never sold
  *   7. scanKalshiEdges / kalshiOrderSize pure-rule checks
+ *   8. carry trigger (Keith, 2026-11-22): the 82–89¢ band, 7-day
+ *      window, tight-spread and high-volume rules as pure checks; the
+ *      mispricing boundary at the new 3pt threshold; flat-cap carry
+ *      sizing; and at runner level — a carry entry marked
+ *      entryKind=carry, no edge-closed exit on a carry position, and
+ *      a market already held is never re-entered
  *
  * Run: npx tsx harness/polycrypt-harness.ts   (from packages/engine)
  * Exit code 0 = all checks passed.
@@ -40,7 +46,9 @@ import type { PaperControl } from "../src/paper.js";
 import type { PendingLiquidation } from "../src/control.js";
 import type { DailyBar, TimedBar } from "../src/indicators.js";
 import {
+  kalshiCarryOrderSize,
   kalshiOrderSize,
+  scanKalshiCarry,
   scanKalshiEdges,
   startPolyCryptTrader,
 } from "../src/polycrypt.js";
@@ -360,6 +368,100 @@ function readState(path: string): Record<string, any> {
   check("xrp: sized at 15% of the $10k book", Math.abs(buy.qty - 1500 / 7.5) < 0.01, `qty=${buy.qty}`);
   await until("XRP position tracked", () => existsSync(statePath) && readState(statePath).crypto?.["XRP/USD"] !== undefined);
   check("xrp: only XRP ordered (no BTC/ETH/SOL breakout)", !alpaca.createdOrders.some((o) => o.symbol !== "XRP/USD"));
+}
+
+// ------------------------------------------- 9: carry pure rules + 3pt edge
+{
+  const carryMarket = (overrides: Partial<KalshiMarket> = {}): KalshiMarket => ({
+    ticker: "KXCARRY",
+    title: "Carry market",
+    yesBid: 0.84, yesAsk: 0.85, noBid: 0.15, noAsk: 0.16,
+    lastPrice: 0.85, volume: 5000,
+    closeTime: new Date(NOW.getTime() + 72 * 3_600_000).toISOString(),
+    status: "active", result: null,
+    ...overrides,
+  });
+  // (a) in-band, tight book, high volume, closes in 3 days → carry fires
+  const foundCarry = scanKalshiCarry([carryMarket()], NOW);
+  check("carry: 85¢ / closes in 3d / tight / high-volume triggers", foundCarry.length === 1 && foundCarry[0]!.price === 0.85, `got ${foundCarry.length}`);
+  // (b) outside the 82–89¢ band, both directions
+  check("carry: 80¢ is below the band — no trigger", scanKalshiCarry([carryMarket({ yesBid: 0.79, yesAsk: 0.8, lastPrice: 0.8 })], NOW).length === 0);
+  check("carry: 92¢ is above the band — no trigger", scanKalshiCarry([carryMarket({ yesBid: 0.91, yesAsk: 0.92, lastPrice: 0.92 })], NOW).length === 0);
+  // (c) closes in 10 days → outside the 7-day window
+  check("carry: closing in 10d does not trigger", scanKalshiCarry([carryMarket({ closeTime: new Date(NOW.getTime() + 240 * 3_600_000).toISOString() })], NOW).length === 0);
+  // (d) wide spread / low volume
+  check("carry: 5pt spread does not trigger", scanKalshiCarry([carryMarket({ yesBid: 0.8 })], NOW).length === 0);
+  check("carry: volume 500 (below the 1,000 floor) does not trigger", scanKalshiCarry([carryMarket({ volume: 500 })], NOW).length === 0);
+  // (e) mispricing boundary at the new 3pt threshold
+  const edge35 = edgeMarket({ ticker: "KXE35", lastPrice: 0.6, yesBid: 0.555, yesAsk: 0.565, noBid: 0.435, noAsk: 0.445 });
+  const edge25 = edgeMarket({ ticker: "KXE25", lastPrice: 0.6, yesBid: 0.565, yesAsk: 0.575, noBid: 0.425, noAsk: 0.435 });
+  const foundEdges = scanKalshiEdges([edge35, edge25], NOW);
+  check("edge: 3.5pt edge triggers at the 3pt threshold", foundEdges.some((f) => f.market.ticker === "KXE35"), `got ${foundEdges.map((f) => f.market.ticker).join(",")}`);
+  check("edge: 2.5pt edge does not trigger", !foundEdges.some((f) => f.market.ticker === "KXE25"));
+  // (f) flat-cap sizing: 3% of a $10k book at 85¢ = 352 contracts, spend inside both caps
+  check("carry sizing: flat 3%-of-book cap → 352 @ 85¢", kalshiCarryOrderSize(0.85, 10000) === 352, `got ${kalshiCarryOrderSize(0.85, 10000)}`);
+  check("carry sizing: spend ≤ 3% per-position cap (and ≤ 5% per-market)", kalshiCarryOrderSize(0.85, 10000) * 0.85 <= 300);
+}
+
+// ------------------------------------------- 10: carry at runner level
+{
+  const carryKalshiMarket: KalshiMarket = {
+    ticker: "KXCARRY",
+    title: "Carry market",
+    yesBid: 0.84, yesAsk: 0.85, noBid: 0.15, noAsk: 0.16,
+    lastPrice: 0.85, volume: 5000,
+    closeTime: new Date(NOW.getTime() + 72 * 3_600_000).toISOString(),
+    status: "active", result: null,
+  };
+  const kalshi = new FakeKalshi();
+  kalshi.markets = [carryKalshiMarket];
+  const events: FleetEvent[] = [];
+  const statePath = join(dir, "carry.json");
+  startPolyCryptTrader(polyBot, { alpaca: new FakeAlpaca(), kalshi }, async (e) => { events.push(e); }, new FakeControl(), {
+    now: () => NOW, statePath, tickMs: 15,
+  });
+  await until("carry entry order", () => kalshi.createdOrders.some((o) => o.ticker === "KXCARRY" && o.action === "buy"));
+  const cBuy = kalshi.createdOrders.find((o) => o.ticker === "KXCARRY")!;
+  check("carry runner: YES buy at the 85¢ offer", cBuy.side === "yes" && cBuy.price === 0.85, `side=${cBuy.side} price=${cBuy.price}`);
+  check("carry runner: flat-cap count 352 (3% of the $10k book)", cBuy.count === 352, `count=${cBuy.count}`);
+  check(
+    "carry runner: decision record names the CARRY trigger + band",
+    events.some((e) => e.symbol === "KXCARRY" && e.reason.includes("CARRY signal") && e.reason.includes("82%") && e.reason.includes("89%")),
+  );
+  await until("carry position tracked", () => readState(statePath).kalshi?.KXCARRY !== undefined);
+  check("carry runner: position marked entryKind=carry", readState(statePath).kalshi.KXCARRY.entryKind === "carry", `got ${readState(statePath).kalshi.KXCARRY.entryKind}`);
+  // The bid (84¢) sits within 1pt of the anchor (85¢): a mispricing
+  // position would edge-close here; a carry position must NOT.
+  await sleep(300);
+  check("carry runner: no edge-closed exit fires on a carry position", !kalshi.createdOrders.some((o) => o.ticker === "KXCARRY" && o.action === "sell"));
+
+  // (g) a market already held is never re-entered: seed the position,
+  // boot a fresh runner (fresh scan key), the scan must place nothing.
+  const kalshiHeld = new FakeKalshi();
+  kalshiHeld.markets = [carryKalshiMarket];
+  const heldPath = join(dir, "carry-held.json");
+  writeFileSync(heldPath, JSON.stringify({
+    startCapital: 10000, cryptoRealized: 0, kalshiRealized: 0,
+    realizedByDay: {},
+    crypto: {},
+    kalshi: {
+      KXCARRY: {
+        ticker: "KXCARRY", title: "Carry market", side: "yes", count: 352,
+        entryPrice: 0.85, anchor: 0.85, entryKind: "carry",
+        entryDate: "2026-11-06",
+        closeTime: carryKalshiMarket.closeTime,
+        decisionId: "polycrypt9000-1",
+      },
+    },
+    pendingCrypto: [], pendingKalshi: [],
+    lastCryptoHour: null, lastKalshiScanKey: null, shadowNoteDate: null,
+    kalshiMissingNoted: false, decisionCounter: 1,
+  }));
+  startPolyCryptTrader(polyBot, { alpaca: new FakeAlpaca(), kalshi: kalshiHeld }, async () => undefined, new FakeControl(), {
+    now: () => NOW, statePath: heldPath, tickMs: 15,
+  });
+  await sleep(400);
+  check("carry: held market is not re-entered (no duplicate)", kalshiHeld.createdOrders.length === 0, `got ${kalshiHeld.createdOrders.length} orders`);
 }
 
 await sleep(50);
